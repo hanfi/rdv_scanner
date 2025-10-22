@@ -1,0 +1,55 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.pyc
+.pytest_cache/
+
+# Virtual Environment
+.venv/
+venv/
+ENV/
+env/
+
+# Environment (garde .env comme template mais ignore les variantes)
+.env.local
+.env.production
+
+# Logs
+*.log
+logs/
+
+# Screenshots et captures (garde le dossier mais ignore le contenu)
+screenshots/*.png
+screenshots/*.jpg
+screenshots/*.wav
+screenshots/*.mp3
+screenshots/*.jpeg
+
+# Playwright
+.playwright/
+test-results/
+playwright-report/
+playwright/.cache/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.temp
+temp_*
+test_*
+
+# Backup files
+*.bak
+*.backup
