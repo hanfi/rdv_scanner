@@ -105,6 +105,8 @@ class ScreenshotViewerHandler(AuthMixin, BaseHTTPRequestHandler):
                 self.serve_index()
             elif path == '/api/screenshots':
                 self.serve_api_screenshots()
+            elif path == '/api/cleanup':
+                self.serve_cleanup()
             elif path.startswith('/screenshots/'):
                 self.serve_screenshot_file(path)
             else:
@@ -151,6 +153,49 @@ class ScreenshotViewerHandler(AuthMixin, BaseHTTPRequestHandler):
                     padding: 20px; 
                     border-radius: 8px; 
                     box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+                }
+                .toolbar {
+                    display: flex;
+                    justify-content: space-between;
+                    align-items: center;
+                    margin-bottom: 20px;
+                    padding: 15px;
+                    background: #f8f9fa;
+                    border-radius: 6px;
+                    border: 1px solid #e9ecef;
+                }
+                .cleanup-section {
+                    display: flex;
+                    align-items: center;
+                    gap: 10px;
+                }
+                .cleanup-btn {
+                    background: #dc3545;
+                    color: white;
+                    border: none;
+                    padding: 10px 20px;
+                    border-radius: 5px;
+                    cursor: pointer;
+                    font-size: 0.9em;
+                    transition: background 0.2s;
+                    display: flex;
+                    align-items: center;
+                    gap: 8px;
+                }
+                .cleanup-btn:hover {
+                    background: #c82333;
+                }
+                .cleanup-btn:disabled {
+                    background: #6c757d;
+                    cursor: not-allowed;
+                }
+                .cleanup-status {
+                    font-size: 0.9em;
+                    color: #666;
+                }
+                .stats-info {
+                    font-size: 0.9em;
+                    color: #495057;
                 }
                 .file-grid { 
                     display: grid; 
@@ -250,6 +295,18 @@ class ScreenshotViewerHandler(AuthMixin, BaseHTTPRequestHandler):
             </div>
             
             <div class="container">
+                <div class="toolbar">
+                    <div class="stats-info">
+                        <span id="fileCount">Chargement...</span>
+                    </div>
+                    <div class="cleanup-section">
+                        <div class="cleanup-status" id="cleanupStatus"></div>
+                        <button class="cleanup-btn" id="cleanupBtn" onclick="cleanupScreenshots()">
+                            🗑️ Nettoyer les Screenshots
+                        </button>
+                    </div>
+                </div>
+                
                 <div class="loading">
                     🔄 Chargement des screenshots...
                 </div>
@@ -287,6 +344,15 @@ class ScreenshotViewerHandler(AuthMixin, BaseHTTPRequestHandler):
 
                 function displayFiles(files) {
                     const container = document.getElementById('filesList');
+                    const fileCountElement = document.getElementById('fileCount');
+                    
+                    // Mettre à jour les statistiques
+                    if (files && files.length > 0) {
+                        const totalSize = files.reduce((sum, file) => sum + file.size, 0);
+                        fileCountElement.textContent = `📊 ${files.length} fichiers • ${formatSize(totalSize)}`;
+                    } else {
+                        fileCountElement.textContent = '📊 0 fichiers • 0 B';
+                    }
                     
                     if (!files || files.length === 0) {
                         container.innerHTML = '<div class="status">📭 Aucun screenshot disponible</div>';
@@ -328,6 +394,59 @@ class ScreenshotViewerHandler(AuthMixin, BaseHTTPRequestHandler):
                             `).join('')}
                         </div>
                     `;
+                }
+
+                async function cleanupScreenshots() {
+                    const button = document.getElementById('cleanupBtn');
+                    const status = document.getElementById('cleanupStatus');
+                    
+                    if (!confirm('⚠️ Êtes-vous sûr de vouloir supprimer TOUS les screenshots ?\\n\\nCette action est irréversible !')) {
+                        return;
+                    }
+                    
+                    try {
+                        button.disabled = true;
+                        button.innerHTML = '⏳ Nettoyage...';
+                        status.textContent = 'Suppression en cours...';
+                        
+                        const urlParams = new URLSearchParams(window.location.search);
+                        const token = urlParams.get('token');
+                        const url = token ? `/api/cleanup?token=${token}` : '/api/cleanup';
+                        
+                        const response = await fetch(url);
+                        if (!response.ok) {
+                            throw new Error(`HTTP ${response.status}`);
+                        }
+                        
+                        const result = await response.json();
+                        
+                        if (result.success) {
+                            status.textContent = `✅ ${result.deleted_count} fichier(s) supprimé(s)`;
+                            status.style.color = '#28a745';
+                            
+                            // Recharger la liste après 1 seconde
+                            setTimeout(() => {
+                                loadScreenshots();
+                                status.textContent = '';
+                                status.style.color = '#666';
+                            }, 2000);
+                        } else {
+                            throw new Error(result.error || 'Erreur inconnue');
+                        }
+                        
+                    } catch (error) {
+                        status.textContent = `❌ Erreur: ${error.message}`;
+                        status.style.color = '#dc3545';
+                        
+                        setTimeout(() => {
+                            status.textContent = '';
+                            status.style.color = '#666';
+                        }, 5000);
+                        
+                    } finally {
+                        button.disabled = false;
+                        button.innerHTML = '🗑️ Nettoyer les Screenshots';
+                    }
                 }
 
                 function formatSize(bytes) {
@@ -431,6 +550,62 @@ class ScreenshotViewerHandler(AuthMixin, BaseHTTPRequestHandler):
             
         except Exception as e:
             self.send_error(500, f'Erreur de lecture: {str(e)}')
+    
+    def serve_cleanup(self):
+        """Nettoie le dossier screenshots"""
+        try:
+            screenshots_dir = "/app/screenshots"
+            if not os.path.exists(screenshots_dir):
+                screenshots_dir = "./screenshots"
+            
+            deleted_count = 0
+            deleted_files = []
+            errors = []
+            
+            if os.path.exists(screenshots_dir):
+                for filename in os.listdir(screenshots_dir):
+                    if filename.endswith(('.png', '.wav')) and not filename.startswith('.'):
+                        filepath = os.path.join(screenshots_dir, filename)
+                        try:
+                            os.remove(filepath)
+                            deleted_files.append(filename)
+                            deleted_count += 1
+                        except Exception as e:
+                            errors.append(f"{filename}: {str(e)}")
+            
+            response = {
+                'success': True,
+                'deleted_count': deleted_count,
+                'deleted_files': deleted_files[:10],  # Limiter à 10 pour l'affichage
+                'errors': errors,
+                'timestamp': datetime.now().isoformat()
+            }
+            
+            if errors:
+                response['success'] = False
+                response['error'] = f"{len(errors)} erreur(s) lors de la suppression"
+            
+            self.send_response(200)
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps(response, indent=2).encode())
+            
+            # Log de l'action
+            client_ip = self.client_address[0]
+            print(f"🗑️ Cleanup par {client_ip}: {deleted_count} fichier(s) supprimé(s)")
+            
+        except Exception as e:
+            error_response = {
+                'success': False,
+                'error': str(e),
+                'deleted_count': 0,
+                'timestamp': datetime.now().isoformat()
+            }
+            
+            self.send_response(500)
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps(error_response, indent=2).encode())
     
     def serve_health(self):
         """Health check public pour Railway"""
