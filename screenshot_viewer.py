@@ -13,19 +13,31 @@ from datetime import datetime
 class ScreenshotViewerHandler(BaseHTTPRequestHandler):
     
     def do_GET(self):
-        """Gérer les requêtes GET"""
-        path = unquote(self.path)
-        
-        if path == '/':
-            self.serve_index()
-        elif path == '/api/screenshots':
-            self.serve_screenshots_list()
-        elif path.startswith('/screenshots/'):
-            self.serve_file(path)
-        elif path == '/health':
-            self.serve_health()
-        else:
-            self.send_error(404)
+        """Gère les requêtes GET"""
+        try:
+            parsed_url = urlparse(self.path)
+            path = parsed_url.path
+            
+            # Health check public (pour Railway)
+            if path == '/health':
+                self.serve_health()
+                return
+            
+            # Vérification de l'authentification pour les autres endpoints
+            if not self.check_auth():
+                self.send_auth_required()
+                return
+            
+            if path == '/' or path == '/index.html':
+                self.serve_index()
+            elif path == '/api/screenshots':
+                self.serve_api_screenshots()
+            elif path.startswith('/screenshots/'):
+                self.serve_screenshot_file(path)
+            else:
+                self.send_error(404, 'Page non trouvée')
+        except Exception as e:
+            self.send_error(500, f'Erreur serveur: {str(e)}')
     
     def serve_index(self):
         """Page d'accueil avec liste des screenshots"""

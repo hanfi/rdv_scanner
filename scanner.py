@@ -24,7 +24,7 @@ except ImportError:
 
 # Import optionnel du viewer de screenshots
 try:
-    from screenshot_viewer import start_screenshot_viewer
+    from screenshot_viewer_secure import run_screenshot_viewer
     SCREENSHOT_VIEWER_AVAILABLE = True
 except ImportError:
     SCREENSHOT_VIEWER_AVAILABLE = False
@@ -516,8 +516,8 @@ class MultimodalRDVScanner:
         # Démarrer le screenshot viewer si disponible
         if SCREENSHOT_VIEWER_AVAILABLE:
             try:
-                start_screenshot_viewer(8081)
-                logger.info("🖼️ Screenshot viewer disponible sur :8081")
+                run_screenshot_viewer(8081)
+                logger.info("🖼️ Screenshot viewer sécurisé disponible sur :8081")
             except Exception as e:
                 logger.warning("Screenshot viewer non démarré: %s", e)
 
