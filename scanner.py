@@ -35,6 +35,7 @@ class MultimodalRDVScanner:
         self.url_page2 = os.getenv('PAGE_2_URL')
         self.headless = os.getenv('HEADLESS', 'false').lower() == 'true'
         self.mute_browser = os.getenv('MUTE_BROWSER', 'true').lower() == 'true'
+        self.background_mode = os.getenv('BACKGROUND_MODE', 'false').lower() == 'true'
         self.check_interval = int(os.getenv('CHECK_INTERVAL', '300'))
         self.max_retries = 3
 
@@ -54,6 +55,7 @@ class MultimodalRDVScanner:
         logger.info("Page 2: %s", self.url_page2)
         logger.info("Mode headless: %s", self.headless)
         logger.info("Mode muet: %s", self.mute_browser)
+        logger.info("Mode arrière-plan: %s", self.background_mode)
         logger.info("Intervalle: %ss", self.check_interval)
         logger.info("Max retries: %s", self.max_retries)
 
@@ -159,7 +161,6 @@ class MultimodalRDVScanner:
 
             # Scroll et attente
             page.evaluate('window.scrollBy(0, 500)')
-            page.wait_for_timeout(500)
 
             # Vérifier la présence du captcha
             captcha_field = page.locator('input[name="captchaUsercode"]')
@@ -215,12 +216,15 @@ class MultimodalRDVScanner:
             page.screenshot(path=before_path, full_page=True)
 
             # Soumission
-            page.wait_for_timeout(1000)
             submit_btn.click()
             logger.info("✅ Formulaire soumis")
 
-            # Attendre la réponse
-            page.wait_for_timeout(5000)
+            # Attendre la réponse (navigation ou changement d'URL)
+            try:
+                page.wait_for_load_state('networkidle', timeout=10000)
+            except Exception:
+                # Si pas de changement de page, attendre un peu pour le contenu
+                page.wait_for_timeout(2000)
 
             # Analyser la réponse
             current_url = page.url
@@ -340,7 +344,27 @@ class MultimodalRDVScanner:
 
         with sync_playwright() as p:
             # Arguments de lancement avec muting si configuré
-            launch_args = ['--disable-blink-features=AutomationControlled']
+            launch_args = [
+                '--disable-blink-features=AutomationControlled',
+                '--no-first-run',              # Pas de setup initial
+                '--no-default-browser-check',  # Pas de vérification navigateur par défaut
+                '--disable-background-timer-throttling',  # Meilleure performance
+                '--disable-renderer-backgrounding',       # Empêche la mise en arrière-plan
+                '--disable-backgrounding-occluded-windows', # Garde les fenêtres actives
+                '--disable-ipc-flooding-protection',       # Améliore la réactivité
+            ]
+            
+            # Mode arrière-plan : empêche la prise de focus
+            if self.background_mode:
+                launch_args.extend([
+                    '--silent-launch',           # Lancement silencieux
+                    '--disable-background-mode', # Désactive le mode arrière-plan agressif
+                    '--disable-extensions',      # Désactive les extensions
+                    '--disable-plugins',         # Désactive les plugins
+                    '--disable-default-apps',    # Pas d'apps par défaut
+                ])
+                logger.info("🔕 Mode arrière-plan activé (pas de prise de focus)")
+            
             if self.mute_browser:
                 launch_args.extend([
                     '--mute-audio',

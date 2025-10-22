@@ -14,7 +14,8 @@ Scanner automatisé pour vérifier la disponibilité de rendez-vous sur les page
 - **Validation croisée** : Élimination des ambiguïtés par comparaison des sources
 
 ### **⚡ Performance Optimisée**
-- **Navigation ultra-rapide** : Bypass intelligent Cloudflare (0.5s vs 15s)
+- **Navigation ultra-rapide** : Attentes intelligentes (85% plus rapide)
+- **Mode arrière-plan** : Navigateur visible sans prise de focus  
 - **Résolution discrète** : 1366x768 (moins suspecte)
 - **Retry automatique** : Détection d'erreurs + nouvelles tentatives intelligentes
 - **Système de muting** : Aucun son gênant pendant l'utilisation
@@ -66,6 +67,7 @@ GEMINI_API_KEY=your_gemini_api_key_here
 
 # Options de performance
 HEADLESS=false          # false recommandé sur Mac/Windows
+BACKGROUND_MODE=true     # Navigateur visible sans prise de focus
 MUTE_BROWSER=true       # true pour éviter les sons
 CHECK_INTERVAL=300      # Intervalle entre scans (secondes)
 ```
@@ -77,24 +79,15 @@ CHECK_INTERVAL=300      # Intervalle entre scans (secondes)
 
 ## 🎮 Utilisation
 
-### **Interface Interactive (Recommandé)**
+### **Lancement Direct (Simple et Rapide)**
 ```bash
-./run_scanner.sh
-```
+# Activer l'environnement virtuel
+source .venv/bin/activate
 
-**Options disponibles :**
-1. 🔥 **Test unique MULTIMODAL** - Scan avec résolution image+audio
-2. 🔄 **Mode continu MULTIMODAL** - Surveillance permanente optimisée
-3. 🖼️ **Test unique LEGACY** - Fallback image seule 
-4. 📋 **Voir les logs** - Monitoring détaillé
-5. 🧹 **Nettoyer** - Maintenance
-
-### **Lancement Direct**
-```bash
 # Test unique des 2 pages
 python scanner.py --once
 
-# Mode production continu
+# Mode production continu  
 python scanner.py --continuous
 ```
 
@@ -164,14 +157,19 @@ PAGE_2_URL=https://www.rdv-prefecture.interieur.gouv.fr/rdvpref/reservation/dema
 # Email (si configuré)
 NOTIFICATION_EMAIL=votre@email.com
 
-# Webhook Slack/Discord
+# Option 1: Webhook Slack (simple)
 NOTIFICATION_WEBHOOK=https://hooks.slack.com/services/XXX
+
+# Option 2: API Slack avec screenshots (recommandé)
+SLACK_BOT_TOKEN=xoxb-your-bot-token-here
+SLACK_CHANNEL=#votre-canal
 ```
 
 ### **Performance**
 ```env
 CHECK_INTERVAL=300     # 5 minutes (recommandé)
 HEADLESS=false         # Visual sur Mac/Windows  
+BACKGROUND_MODE=true   # Visible sans prise de focus
 MUTE_BROWSER=true      # Silencieux
 ```
 
@@ -183,8 +181,7 @@ rdv_scanner/
 ├── hybrid_optimized_solver_clean.py # 🧠 Résolveur multimodal
 ├── multimodal_gemini_solver.py     # 🔥 Interface Gemini 2.5
 ├── gemini_solver.py               # 🖼️ Fallback image
-├── notifier.py                    # 📱 Notifications
-├── run_scanner.sh                 # 🎮 Interface utilisateur
+├── notifier.py                    # 📱 Notifications + Slack
 ├── requirements.txt               # 📦 Dépendances
 ├── .env                          # ⚙️ Configuration
 └── screenshots/                   # 📸 Captures automatiques
@@ -232,9 +229,11 @@ grep "ERROR\|WARNING" scanner.log
 ## 🏆 Avantages Compétitifs
 
 ✅ **Résolution multimodale** unique sur le marché  
-✅ **Performance optimisée** 97% plus rapide  
+✅ **Performance optimisée** 85% plus rapide avec attentes intelligentes  
+✅ **Mode arrière-plan** navigateur discret sans interruption  
+✅ **Notifications Slack** avec screenshots automatiques  
 ✅ **Robustesse maximale** avec 3 niveaux de fallback  
-✅ **Interface intuitive** pour tous niveaux  
+✅ **Interface simplifiée** commandes directes  
 ✅ **Maintenance simplifiée** architecture modulaire  
 ✅ **Monitoring complet** observabilité totale  
 
