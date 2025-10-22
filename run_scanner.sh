@@ -50,27 +50,26 @@ read -p "Votre choix (1-6): " choice
 
 case $choice in
     1)
-        print_color "� Lancement du scanner multimodal (test unique)..." $GREEN
-        "$VENV_PATH/bin/python" "$SCANNER_SCRIPT" --once
+        echo "🔥 Lancement test unique multimodal..."
+        python scanner.py --once
         ;;
     2)
-        print_color "🔄 Lancement du scanner multimodal (mode continu)..." $GREEN
-        print_color "⚠️  Utilisez Ctrl+C pour arrêter" $YELLOW
-        "$VENV_PATH/bin/python" "$SCANNER_SCRIPT" --continuous
+        echo "🔄 Lancement mode continu multimodal..."
+        python scanner.py --continuous
         ;;
     3)
         print_color "🖼️ Lancement du scanner legacy (image seule)..." $GREEN
         "$VENV_PATH/bin/python" "$LEGACY_SCANNER" --once
         ;;
     4)
-        if [ -f "$SCRIPT_DIR/rdv_scanner_multimodal.log" ]; then
-            print_color "📋 Dernières lignes du log multimodal:" $GREEN
-            tail -50 "$SCRIPT_DIR/rdv_scanner_multimodal.log"
+        if [ -f "scanner.log" ]; then
+            echo "📋 Affichage des logs récents..."
+            tail -50 scanner.log
         elif [ -f "$SCRIPT_DIR/rdv_scanner.log" ]; then
             print_color "📋 Dernières lignes du log legacy:" $GREEN
             tail -50 "$SCRIPT_DIR/rdv_scanner.log"
         else
-            print_color "📋 Aucun fichier de log trouvé" $YELLOW
+            echo "❌ Aucun fichier de log trouvé (scanner.log)"
         fi
         ;;
     5)
