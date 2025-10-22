@@ -76,16 +76,29 @@ class Notifier:
             results: Résultats bruts
         """
         try:
-            # Format Slack/Discord
+            # Format Slack optimisé avec liens cliquables
             payload = {
-                "text": message,
+                "text": "🚨 *RENDEZ-VOUS DISPONIBLE DÉTECTÉ!*",
                 "attachments": [
                     {
                         "color": "good",
-                        "title": result['page'],
+                        "title": f"🎯 {result['page']}",
                         "title_link": result['url'],
-                        "text": result['message'],
-                        "footer": "RDV Scanner",
+                        "text": f"{result['message']}\n\n🔗 *Lien direct:* <{result['url']}|Réserver maintenant>",
+                        "fields": [
+                            {
+                                "title": "📅 Détection",
+                                "value": result['timestamp'][:19].replace('T', ' '),
+                                "short": True
+                            },
+                            {
+                                "title": "⚡ Action",
+                                "value": f"<{result['url']}|Ouvrir la page>",
+                                "short": True
+                            }
+                        ],
+                        "footer": "RDV Scanner • Agissez vite!",
+                        "footer_icon": "https://🚀",
                         "ts": int(datetime.fromisoformat(result['timestamp']).timestamp())
                     }
                     for result in results
