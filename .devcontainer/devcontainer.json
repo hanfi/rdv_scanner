@@ -68,13 +68,9 @@
 		}
 	},
 
-	"postCreateCommand": "bash .devcontainer/postCreate.sh",
+	"postCreateCommand": "pip install -r requirements.txt && cp .env.example .env 2>/dev/null || true",
 
 	"remoteUser": "vscode",
-	
-	"mounts": [
-		"source=${localWorkspaceFolder}/.devcontainer/postCreate.sh,target=/tmp/postCreate.sh,type=bind"
-	],
 
 	"containerEnv": {
 		"PYTHONPATH": "${containerWorkspaceFolder}",

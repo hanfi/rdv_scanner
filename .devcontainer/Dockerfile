@@ -45,22 +45,34 @@ RUN apt-get update && apt-get install -y \
     tree \
     && rm -rf /var/lib/apt/lists/*
 
-# Installation de Google Chrome (pour Playwright)
-RUN wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | apt-key add - \
-    && echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" | tee /etc/apt/sources.list.d/google-chrome.list \
-    && apt-get update \
-    && apt-get install -y google-chrome-stable \
-    && rm -rf /var/lib/apt/lists/*
+# Installation de Chromium (alternative cross-platform pour ARM64/AMD64)
+RUN apt-get update \
+    && apt-get install -y \
+        chromium \
+        chromium-driver \
+        fonts-liberation \
+        fonts-noto-color-emoji \
+    && rm -rf /var/lib/apt/lists/* \
+    && ln -sf /usr/bin/chromium /usr/bin/google-chrome
 
 # Mise à jour de pip et installation d'outils Python utiles
-RUN python -m pip install --upgrade pip \
-    && pip install \
+RUN python -m pip install --upgrade pip --no-cache-dir \
+    && pip install --no-cache-dir \
         black \
         pylint \
         mypy \
         pytest \
         ipython \
-        jupyter
+        jupyter \
+        playwright \
+        python-dotenv \
+        requests \
+        google-generativeai \
+        beautifulsoup4 \
+        twocaptcha
+
+# Installation des navigateurs Playwright (sans deps pour optimiser)
+RUN playwright install chromium
 
 # Configuration du workspace
 WORKDIR /workspaces/rdv_scanner
