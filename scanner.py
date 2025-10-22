@@ -7,12 +7,20 @@ import os
 import sys
 import time
 import logging
+import argparse
 from datetime import datetime
 from typing import Dict, Any, List
 from dotenv import load_dotenv
 from playwright.sync_api import sync_playwright
 from hybrid_optimized_solver_clean import HybridOptimizedSolver
 from notifier import Notifier
+
+# Import optionnel du health check pour déploiement cloud
+try:
+    from health_check import start_health_server
+    HEALTH_CHECK_AVAILABLE = True
+except ImportError:
+    HEALTH_CHECK_AVAILABLE = False
 
 # Configuration du logging
 logging.basicConfig(
@@ -491,6 +499,13 @@ class MultimodalRDVScanner:
             self.check_interval
         )
 
+        # Démarrer le health check server si disponible (pour déploiement cloud)
+        if HEALTH_CHECK_AVAILABLE:
+            try:
+                start_health_server()
+            except Exception as e:
+                logger.warning("Health check server non démarré: %s", e)
+
         scan_count = 0
 
         try:
@@ -509,7 +524,7 @@ class MultimodalRDVScanner:
                 for result in results:
                     if result.get('available'):
                         available_pages.append({
-                            'page': result.get('page', 'Unknown'),
+                            'page': result.get('page'),
                             'url': result.get('url', ''),
                             'available': True,
                             'message': result['message'],
@@ -520,7 +535,7 @@ class MultimodalRDVScanner:
                 # Notification si disponible
                 if available_pages:
                     logger.info(
-                        "🎉 %s PAGE(S) AVEC CRÉNEAUX TROUVÉES! Notification envoyée.",
+                        "\n🎉 %s PAGE(S) AVEC CRÉNEAUX TROUVÉES!",
                         len(available_pages)
                     )
                     try:
@@ -529,15 +544,12 @@ class MultimodalRDVScanner:
                         logger.warning("Erreur notification: %s", e)
                 else:
                     logger.info(
-                        "😔 Aucun créneau disponible sur les %s pages",
+                        "\n😔 Aucun créneau disponible sur les %s pages",
                         len(results)
                     )
 
                 # Attendre avant le prochain scan
-                logger.info(
-                    "⏳ Prochain scan dans %s secondes...",
-                    self.check_interval
-                )
+                logger.info("💤 Attente %ss avant le prochain scan...", self.check_interval)
                 time.sleep(self.check_interval)
 
         except KeyboardInterrupt:

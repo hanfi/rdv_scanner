@@ -79,7 +79,7 @@ CHECK_INTERVAL=300      # Intervalle entre scans (secondes)
 
 ## 🎮 Utilisation
 
-### **Lancement Direct (Simple et Rapide)**
+### **Commandes Essentielles**
 ```bash
 # Activer l'environnement virtuel
 source .venv/bin/activate
@@ -90,6 +90,29 @@ python scanner.py --once
 # Mode production continu  
 python scanner.py --continuous
 ```
+
+## 🚀 Déploiement Railway
+
+### **Setup Ultra-Simple**
+1. Va sur [railway.app](https://railway.app)
+2. Connecte ton repo GitHub  
+3. Configure les variables d'environnement
+4. **Déploiement automatique !**
+
+### **Variables Railway Obligatoires**
+```bash
+GEMINI_API_KEY=your_key_here
+PAGE_1_URL=your_url_1  
+PAGE_2_URL=your_url_2
+HEADLESS=false         # Anti-Cloudflare
+MUTE_BROWSER=true
+BACKGROUND_MODE=true
+CHECK_INTERVAL=300     # 5 minutes
+DISPLAY=:99
+XVFB_WHD=1366x768x24
+```
+
+**Résultat** : Scanner H24 gratuit (2000h/mois) ! 🎉
 
 ## 📊 Architecture Technique
 
@@ -157,12 +180,8 @@ PAGE_2_URL=https://www.rdv-prefecture.interieur.gouv.fr/rdvpref/reservation/dema
 # Email (si configuré)
 NOTIFICATION_EMAIL=votre@email.com
 
-# Option 1: Webhook Slack (simple)
+# Webhook Slack
 NOTIFICATION_WEBHOOK=https://hooks.slack.com/services/XXX
-
-# Option 2: API Slack avec screenshots (recommandé)
-SLACK_BOT_TOKEN=xoxb-your-bot-token-here
-SLACK_CHANNEL=#votre-canal
 ```
 
 ### **Performance**
