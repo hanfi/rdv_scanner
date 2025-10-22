@@ -22,6 +22,13 @@ try:
 except ImportError:
     HEALTH_CHECK_AVAILABLE = False
 
+# Import optionnel du viewer de screenshots
+try:
+    from screenshot_viewer import start_screenshot_viewer
+    SCREENSHOT_VIEWER_AVAILABLE = True
+except ImportError:
+    SCREENSHOT_VIEWER_AVAILABLE = False
+
 # Configuration du logging
 logging.basicConfig(
     level=logging.INFO,
@@ -505,6 +512,14 @@ class MultimodalRDVScanner:
                 start_health_server()
             except Exception as e:
                 logger.warning("Health check server non démarré: %s", e)
+
+        # Démarrer le screenshot viewer si disponible
+        if SCREENSHOT_VIEWER_AVAILABLE:
+            try:
+                start_screenshot_viewer(8081)
+                logger.info("🖼️ Screenshot viewer disponible sur :8081")
+            except Exception as e:
+                logger.warning("Screenshot viewer non démarré: %s", e)
 
         scan_count = 0
 

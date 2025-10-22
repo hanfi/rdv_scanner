@@ -37,8 +37,8 @@ ENV PYTHONUNBUFFERED=1
 ENV DISPLAY=:99
 ENV XVFB_WHD=1366x768x24
 
-# Port pour health check (optionnel)
-EXPOSE 8080
+# Port pour health check et screenshot viewer
+EXPOSE 8080 8081
 
 # Script de démarrage avec display virtuel
 COPY start.sh /start.sh
