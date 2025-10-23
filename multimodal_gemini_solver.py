@@ -4,9 +4,12 @@ Résolveur Captcha Multimodal avec Gemini Flash (Image + Audio)
 """
 import glob
 import os
-from typing import Optional
+from typing import List, Optional, Tuple
+import logging
 import google.generativeai as genai
 from dotenv import load_dotenv
+
+logger = logging.getLogger(__name__)
 
 load_dotenv()
 
@@ -21,10 +24,46 @@ class MultimodalGeminiSolver:
 
         genai.configure(api_key=self.api_key)
 
-        # Utiliser Gemini 2.5 Flash qui supporte multimodal
-        self.model = genai.GenerativeModel('gemini-2.5-flash')
+        # Liste prioritaire de modèles (séparés par des virgules) configurable via .env
+        # Ajouter ici les modèles recommandés en fallback pour éviter le rate limiting
+        # Priorité demandée : meilleure qualité puis fallback moins puissants
+        default_priority = (
+            "gemini-2.5-flash,gemini-2.0-flash-exp,gemini-2.0-flash,gemini-2.5-flash-lite,gemini-2.0-flash-lite,gemini-2.5-pro"
+        )
 
-        print("✅ Gemini 2.5 Flash multimodal initialisé")
+        priority_env = os.getenv('GEMINI_MODEL_PRIORITY', default_priority)
+        models = [m.strip() for m in priority_env.split(',') if m.strip()]
+
+        self.model_candidates: List[Tuple[str, genai.GenerativeModel]] = []
+        for model_name in models:
+            try:
+                candidate_model = genai.GenerativeModel(model_name)
+                self.model_candidates.append((model_name, candidate_model))
+                logger.info(f"✅ Modèle Gemini disponible: {model_name}")
+            except Exception as err:
+                logger.warning(f"⚠️ Impossible d'initialiser le modèle {model_name}: {err}")
+
+        if not self.model_candidates:
+            raise RuntimeError(
+                "Aucun modèle Gemini disponible parmi la liste de priorité. Vérifiez GEMINI_API_KEY et GEMINI_MODEL_PRIORITY"
+            )
+
+        self._preferred_index = 0
+        self.model_name, self.model = self.model_candidates[self._preferred_index]
+
+        multimodal_env = os.getenv('GEMINI_MULTIMODAL_MODELS')
+        if multimodal_env:
+            self._multimodal_whitelist = {m.strip() for m in multimodal_env.split(',') if m.strip()}
+        else:
+            self._multimodal_whitelist = None
+
+        self.supports_multimodal = self._model_supports_multimodal(self.model_name)
+
+        logger.info(f"🔍 Support multimodal: {self.supports_multimodal} (modèle: {self.model_name})")
+        if len(self.model_candidates) > 1:
+            fallback_names = ', '.join(name for name, _ in self.model_candidates[1:])
+            if fallback_names:
+                logger.info(f"➡️ Fallbacks disponibles: {fallback_names}")
 
     def is_available(self) -> bool:
         """Vérifie si Gemini est disponible"""
@@ -41,86 +80,200 @@ class MultimodalGeminiSolver:
         Returns:
             Code captcha résolu ou None
         """
-        try:
-            print(f"🤖 Analyse multimodale: {image_path} + {audio_path}")
-
-            # Préparer l'image
-            image_data = self._prepare_image(image_path)
-            if not image_data:
-                return None
-
-            # Préparer l'audio
-            audio_data = self._prepare_audio(audio_path)
-            if not audio_data:
-                return None
-
-            # Prompt multimodal optimisé
-            prompt = self._create_multimodal_prompt()
-
-            # Génération avec les deux modalités
-            response = self.model.generate_content([
-                prompt,
-                image_data,
-                audio_data
-            ])
-
-            if not response.text:
-                print("❌ Pas de réponse de Gemini")
-                return None
-
-            # Nettoyer la réponse
-            captcha_code = self._clean_response(response.text)
-
-            print(f"✅ Gemini multimodal: '{captcha_code}'")
-            return captcha_code
-
-        except Exception as e:
-            print(f"❌ Erreur Gemini multimodal: {e}")
+        image_data = self._prepare_image(image_path)
+        if not image_data:
             return None
 
-    def solve_captcha_image_only(self, image_path: str) -> Optional[str]:
+        audio_data = self._prepare_audio(audio_path)
+        if not audio_data:
+            return None
+
+        prompt = self._create_multimodal_prompt()
+        last_error: Optional[Exception] = None
+
+        for index, (model_name, model_instance) in self._iterate_candidates():
+            supports_multimodal = self._model_supports_multimodal(model_name)
+            if not supports_multimodal:
+                logger.info(f"⏭️ Modèle {model_name} ignoré (pas de support multimodal déclaré)")
+                continue
+
+            logger.info(f"🤖 Analyse multimodale avec modèle '{model_name}': {image_path} + {audio_path}")
+
+            try:
+                response = model_instance.generate_content([prompt, image_data, audio_data])
+                text = getattr(response, 'text', None)
+                if not text:
+                    logger.warning(f"❌ Pas de réponse de Gemini pour le modèle {model_name}")
+                    continue
+
+                captcha_code = self._clean_response(text)
+                logger.info(f"✅ Gemini multimodal (modèle {model_name}): '{captcha_code}'")
+                self._set_active_model(index, supports_multimodal)
+                return captcha_code
+
+            except Exception as error:
+                last_error = error
+                if self._is_rate_limit_error(error):
+                    logger.warning(f"⏳ Rate limit sur le modèle {model_name}, essai du suivant")
+                    continue
+
+                logger.error(f"❌ Erreur Gemini multimodal ({model_name}): {error}")
+                continue
+
+        if last_error:
+            logger.error(f"❌ Tous les modèles multimodaux ont échoué. Dernière erreur: {last_error}")
+        else:
+            logger.error("❌ Aucun modèle multimodal n'a pu répondre.")
+        return None
+
+    def solve_captcha_image_only(self, image_path: str, image_data=None) -> Optional[str]:
         """Résolution image seule (fallback)"""
         try:
-            image_data = self._prepare_image(image_path)
+            if image_data is None:
+                image_data = self._prepare_image(image_path)
             if not image_data:
                 return None
 
             prompt = self._create_image_prompt()
+            last_error: Optional[Exception] = None
 
-            response = self.model.generate_content([prompt, image_data])
+            for index, (model_name, model_instance) in self._iterate_candidates():
+                logger.info(f"🖼️ Résolution image-only avec modèle '{model_name}'")
+                try:
+                    response = model_instance.generate_content([prompt, image_data])
+                    text = getattr(response, 'text', None)
+                    if not text:
+                        logger.warning(f"❌ Pas de réponse de Gemini pour le modèle {model_name}")
+                        continue
 
-            if not response.text:
-                return None
+                    captcha_code = self._clean_response(text)
+                    logger.info(f"✅ Gemini image (modèle {model_name}): '{captcha_code}'")
+                    supports_multimodal = self._model_supports_multimodal(model_name)
+                    self._set_active_model(index, supports_multimodal)
+                    return captcha_code
 
-            captcha_code = self._clean_response(response.text)
-            print(f"✅ Gemini image: '{captcha_code}'")
-            return captcha_code
+                except Exception as error:
+                    last_error = error
+                    if self._is_rate_limit_error(error):
+                        logger.warning(f"⏳ Rate limit sur le modèle {model_name}, essai du suivant")
+                        continue
 
-        except Exception as e:
-            print(f"❌ Erreur Gemini image: {e}")
+                    logger.error(f"❌ Erreur Gemini image ({model_name}): {error}")
+                    continue
+
+            if last_error:
+                logger.error(f"❌ Tous les modèles image-only ont échoué. Dernière erreur: {last_error}")
+            else:
+                logger.error("❌ Aucun modèle n'a pu traiter l'image.")
             return None
 
-    def solve_captcha_audio_only(self, audio_path: str) -> Optional[str]:
+        except Exception as error:
+            logger.error(f"❌ Erreur Gemini image: {error}")
+            return None
+
+    def solve_captcha_audio_only(self, audio_path: str, audio_data=None) -> Optional[str]:
         """Résolution audio seule (fallback)"""
         try:
-            audio_data = self._prepare_audio(audio_path)
+            if audio_data is None:
+                audio_data = self._prepare_audio(audio_path)
             if not audio_data:
                 return None
 
             prompt = self._create_audio_prompt()
+            last_error: Optional[Exception] = None
 
-            response = self.model.generate_content([prompt, audio_data])
+            for index, (model_name, model_instance) in self._iterate_candidates():
+                supports_multimodal = self._model_supports_multimodal(model_name)
+                if not supports_multimodal:
+                    logger.info(f"⏭️ Modèle {model_name} ignoré (pas de support multimodal déclaré)")
+                    continue
 
-            if not response.text:
-                return None
+                logger.info(f"🎧 Résolution audio-only avec modèle '{model_name}'")
+                try:
+                    response = model_instance.generate_content([prompt, audio_data])
+                    text = getattr(response, 'text', None)
+                    if not text:
+                        logger.warning(f"❌ Pas de réponse de Gemini pour le modèle {model_name}")
+                        continue
 
-            captcha_code = self._clean_response(response.text)
-            print(f"✅ Gemini audio: '{captcha_code}'")
-            return captcha_code
+                    captcha_code = self._clean_response(text)
+                    logger.info(f"✅ Gemini audio (modèle {model_name}): '{captcha_code}'")
+                    self._set_active_model(index, supports_multimodal)
+                    return captcha_code
 
-        except Exception as e:
-            print(f"❌ Erreur Gemini audio: {e}")
+                except Exception as error:
+                    last_error = error
+                    if self._is_rate_limit_error(error):
+                        logger.warning(f"⏳ Rate limit sur le modèle {model_name}, essai du suivant")
+                        continue
+
+                    logger.error(f"❌ Erreur Gemini audio ({model_name}): {error}")
+                    continue
+
+            if last_error:
+                logger.error(f"❌ Tous les modèles audio-only ont échoué. Dernière erreur: {last_error}")
+            else:
+                logger.error("❌ Aucun modèle n'a pu traiter l'audio.")
             return None
+
+        except Exception as error:
+            logger.error(f"❌ Erreur Gemini audio: {error}")
+            return None
+
+    def _iterate_candidates(self):
+        """Itère sur les candidats en commençant par le modèle préféré."""
+        total = len(self.model_candidates)
+        for offset in range(total):
+            index = (self._preferred_index + offset) % total
+            yield index, self.model_candidates[index]
+
+    def _set_active_model(self, index: int, supports_multimodal: bool) -> None:
+        """Mémorise le modèle actif après un succès."""
+        self._preferred_index = index
+        self.model_name, self.model = self.model_candidates[index]
+        self.supports_multimodal = supports_multimodal
+
+    def _model_supports_multimodal(self, model_name: str) -> bool:
+        """Indique si un modèle supporte image+audio selon la configuration."""
+        if self._multimodal_whitelist is None:
+            return True
+        return model_name in self._multimodal_whitelist
+
+    @staticmethod
+    def _is_rate_limit_error(error: Exception) -> bool:
+        """Détecte les erreurs liées au rate limit pour déclencher un fallback."""
+        keywords = (
+            "rate limit",
+            "quota",
+            "429",
+            "resource exhausted",
+            "too many requests",
+        )
+        message = str(error).lower()
+        if any(keyword in message for keyword in keywords):
+            return True
+
+        code = getattr(error, 'code', None)
+        if code in (429, '429'):
+            return True
+
+        status = getattr(error, 'status', None)
+        if status in (429, 'RESOURCE_EXHAUSTED', 'TOO_MANY_REQUESTS'):
+            return True
+
+        status_code = getattr(error, 'status_code', None)
+        if status_code in (429, '429'):
+            return True
+
+        try:
+            from google.api_core import exceptions as google_exceptions
+            if isinstance(error, (google_exceptions.ResourceExhausted, google_exceptions.TooManyRequests)):
+                return True
+        except Exception:
+            # google.api_core peut ne pas être présent ou ne pas exposer ces exceptions
+            pass
+
+        return False
 
     def _prepare_image(self, image_path: str):
         """Prépare les données image pour Gemini"""

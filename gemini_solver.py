@@ -17,13 +17,33 @@ class GeminiCaptchaSolver:
         self.api_key = os.getenv('GEMINI_API_KEY')
         self.use_gemini = os.getenv('USE_GEMINI', 'false').lower() == 'true'
         self.model = None
+        self.model_name = None
+        # Par défaut on considère que les modèles listés supportent le multimodal
+        # (utile pour l'observabilité et la compatibilité avec le solver multimodal)
+        self.supports_multimodal = True
         
         if self.use_gemini and self.api_key and self.api_key != 'your_gemini_api_key_here':
             try:
                 import google.generativeai as genai
                 genai.configure(api_key=self.api_key)
-                self.model = genai.GenerativeModel('gemini-2.0-flash-exp')
-                logger.info("✅ Gemini Vision initialisé avec succès")
+
+                # Priorité des modèles configurable via .env pour fallback
+                # Priorité demandée par l'utilisateur
+                default_priority = 'gemini-2.5-flash,gemini-2.0-flash-exp,gemini-2.0-flash,gemini-2.5-flash-lite,gemini-2.0-flash-lite,gemini-2.5-pro'
+                priority_env = os.getenv('GEMINI_MODEL_PRIORITY', default_priority)
+                models = [m.strip() for m in priority_env.split(',') if m.strip()]
+
+                for model_name in models:
+                    try:
+                        self.model = genai.GenerativeModel(model_name)
+                        self.model_name = model_name
+                        logger.info(f"✅ Gemini Vision initialisé avec le modèle: {model_name}")
+                        logger.info(f"🔍 Support multimodal: {self.supports_multimodal} (modèle: {self.model_name})")
+                        break
+                    except Exception:
+                        self.model = None
+                if not self.model:
+                    logger.warning("⚠️ Aucun modèle Gemini initialisé (tous ont échoué)")
             except Exception as e:
                 logger.warning(f"⚠️ Erreur lors de l'initialisation de Gemini: {e}")
                 self.model = None
@@ -45,7 +65,7 @@ class GeminiCaptchaSolver:
             return None
         
         try:
-            logger.info(f"🤖 Analyse du captcha avec Gemini: {image_path}")
+            logger.info(f"🤖 Analyse du captcha avec Gemini (modèle {getattr(self, 'model', None) and getattr(self, 'model', None).__class__.__name__ or 'unknown'}): {image_path}")
             
             # Charger l'image
             from PIL import Image
@@ -75,6 +95,7 @@ Important rules:
 CAPTCHA text:"""
             
             # Envoyer à Gemini
+            logger.info(f"🧩 Utilisation du modèle Gemini: {getattr(self, 'model_name', 'unknown')}")
             response = self.model.generate_content([prompt, image])
             
             if response and response.text:
@@ -91,7 +112,7 @@ CAPTCHA text:"""
                     logger.warning(f"⚠️ Caractères invalides supprimés: '{result}' -> '{cleaned_result}'")
                     result = cleaned_result
                 
-                logger.info(f"✅ Gemini a lu le captcha: '{result}'")
+                logger.info(f"✅ Gemini a lu le captcha (modèle {getattr(self, 'model_name', 'unknown')}): '{result}'")
                 return result
             else:
                 logger.warning("❌ Gemini n'a pas pu lire le captcha")
