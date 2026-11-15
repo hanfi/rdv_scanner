@@ -441,6 +441,16 @@ class MultimodalRDVScanner:
                 # Si pas de changement de page, attendre un peu pour le contenu
                 page.wait_for_timeout(2000)
 
+            # Cloudflare peut aussi s'intercaler après la soumission : on clique la
+            # case comme à l'arrivée, puis on laisse la page cible se charger.
+            if self._is_cloudflare_page(page):
+                logger.info("⏳ %s : Cloudflare après soumission", page_name)
+                if self._wait_for_cloudflare(page, page_name):
+                    try:
+                        page.wait_for_load_state('networkidle', timeout=10000)
+                    except Exception:
+                        page.wait_for_timeout(2000)
+
             # Analyser la réponse
             current_url = page.url
             body_text = page.locator('body').inner_text()
@@ -605,6 +615,23 @@ class MultimodalRDVScanner:
             )
 
             page = context.new_page()
+
+            # Diagnostic : toute réponse HTTP en erreur, avec l'en-tête Cloudflare
+            # cf-mitigated (« challenge » = requête filtrée par Cloudflare).
+            def log_http_error(response):
+                try:
+                    if response.status >= 400:
+                        headers = response.headers
+                        logger.warning(
+                            "   🌐 HTTP %s %s %s (cf-mitigated=%s, cf-ray=%s)",
+                            response.status, response.request.method,
+                            response.url[:150],
+                            headers.get('cf-mitigated', '-'),
+                            headers.get('cf-ray', '-'))
+                except Exception:
+                    pass
+
+            page.on('response', log_http_error)
 
             # Muter l'onglet pour éviter le son du captcha (si configuré)
             if self.mute_browser:
