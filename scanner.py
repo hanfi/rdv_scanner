@@ -171,25 +171,45 @@ class MultimodalRDVScanner:
         La case est à gauche du widget : on clique à une distance fixe du bord
         gauche de l'iframe, au centre vertical.
         """
-        frames = page.locator(
-            'iframe[src*="challenges.cloudflare.com"], '
-            'iframe[title*="Cloudflare" i], iframe[title*="challenge" i]')
-        # Le widget Turnstile est injecté après le chargement : on attend son iframe
-        try:
-            frames.first.wait_for(state='visible', timeout=15000)
-        except Exception:
-            pass
-        if frames.count() == 0:
-            frame_urls = [f.url for f in page.frames]
-            logger.warning("⚠️ %s : aucune iframe Cloudflare dans le DOM (frames Playwright: %s)",
-                           page_name, frame_urls)
+        # L'iframe Turnstile est dans un shadow DOM fermé : invisible pour les
+        # sélecteurs CSS, mais Playwright la liste dans page.frames.
+        def find_turnstile_frame():
+            for f in page.frames:
+                if 'challenges.cloudflare.com' in f.url:
+                    return f
+            return None
+
+        turnstile = None
+        for _ in range(15):
+            turnstile = find_turnstile_frame()
+            if turnstile:
+                break
+            page.wait_for_timeout(1000)
+        if not turnstile:
+            logger.warning("⚠️ %s : frame Turnstile introuvable (frames: %s)",
+                           page_name, [f.url for f in page.frames])
             return False
-        box = frames.first.bounding_box()
-        if not box:
-            logger.warning("⚠️ %s : iframe Cloudflare non visible", page_name)
-            return False
-        x = box['x'] + 22
-        y = box['y'] + box['height'] / 2
+
+        # Position de l'iframe dans la page ; repli sur la position standard du
+        # widget (300x65 en haut à gauche du contenu) si elle n'est pas lisible.
+        box = None
+        for _ in range(10):
+            try:
+                box = turnstile.frame_element().bounding_box()
+            except Exception:
+                box = None
+            if box and box['width'] > 0:
+                break
+            page.wait_for_timeout(500)
+        if box and box['width'] > 0:
+            x = box['x'] + 22
+            y = box['y'] + box['height'] / 2
+        else:
+            logger.warning("⚠️ %s : position de l'iframe illisible, coordonnées par défaut",
+                           page_name)
+            x, y = 257, 337
+        # Laisse le widget finir de s'afficher avant de cliquer
+        page.wait_for_timeout(1500)
         logger.info("🖱️ %s : clic sur la case Cloudflare (%.0f, %.0f)", page_name, x, y)
         page.mouse.move(x, y, steps=5)
         page.mouse.click(x, y)
