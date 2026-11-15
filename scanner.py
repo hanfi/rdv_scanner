@@ -70,6 +70,9 @@ class MultimodalRDVScanner:
         self.failed_cycles = 0
         self.alert_sent = False
 
+        # Clic sur la case « Verify you are human » si Cloudflare ne se valide pas seul
+        self.cloudflare_click = os.getenv('CLOUDFLARE_CLICK', 'true').lower() == 'true'
+
         if not self.page_urls:
             raise ValueError("Au moins PAGE_1_URL doit être configuré dans .env")
 
@@ -154,26 +157,74 @@ class MultimodalRDVScanner:
         return 'just a moment' in title or 'attention required' in title \
             or 'cloudflare' in title
 
+    def _poll_cloudflare_passed(self, page, wait_s: int) -> bool:
+        """Retourne True dès que la page n'est plus Cloudflare, sinon False après wait_s."""
+        for _ in range(wait_s):
+            page.wait_for_timeout(1000)
+            if not self._is_cloudflare_page(page):
+                return True
+        return False
+
+    def _click_cloudflare_checkbox(self, page, page_name: str) -> bool:
+        """Clique la case « Verify you are human » (widget Turnstile, rendu dans une iframe).
+
+        La case est à gauche du widget : on clique à une distance fixe du bord
+        gauche de l'iframe, au centre vertical.
+        """
+        frames = page.locator(
+            'iframe[src*="challenges.cloudflare.com"], '
+            'iframe[title*="Cloudflare" i], iframe[title*="challenge" i]')
+        if frames.count() == 0:
+            logger.warning("⚠️ %s : aucune iframe Cloudflare trouvée", page_name)
+            return False
+        box = frames.first.bounding_box()
+        if not box:
+            logger.warning("⚠️ %s : iframe Cloudflare non visible", page_name)
+            return False
+        x = box['x'] + 22
+        y = box['y'] + box['height'] / 2
+        logger.info("🖱️ %s : clic sur la case Cloudflare (%.0f, %.0f)", page_name, x, y)
+        page.mouse.move(x, y, steps=5)
+        page.mouse.click(x, y)
+        return True
+
     def _wait_for_cloudflare(self, page, page_name: str, max_wait_s: int = 5) -> bool:
         """Attend que la page d'attente Cloudflare se valide d'elle-même.
 
+        Si elle ne se valide pas, clique la case « Verify you are human »
+        (désactivable avec CLOUDFLARE_CLICK=false).
         Retourne True si la page n'est pas (ou plus) une page Cloudflare.
         """
         if not self._is_cloudflare_page(page):
             return True
         logger.info("⏳ %s : page Cloudflare, attente de validation (max %ss)...",
                     page_name, max_wait_s)
-        for _ in range(max_wait_s):
-            page.wait_for_timeout(1000)
-            if not self._is_cloudflare_page(page):
-                logger.info("✅ %s : vérification Cloudflare passée", page_name)
-                try:
-                    page.wait_for_load_state('domcontentloaded', timeout=10000)
-                except Exception:
-                    pass
-                return True
-        logger.warning("❌ %s : toujours bloqué par Cloudflare après %ss",
-                       page_name, max_wait_s)
+        if self._poll_cloudflare_passed(page, max_wait_s):
+            logger.info("✅ %s : vérification Cloudflare passée", page_name)
+            try:
+                page.wait_for_load_state('domcontentloaded', timeout=10000)
+            except Exception:
+                pass
+            return True
+
+        if not self.cloudflare_click:
+            logger.warning("❌ %s : toujours bloqué par Cloudflare après %ss",
+                           page_name, max_wait_s)
+            return False
+
+        if not self._click_cloudflare_checkbox(page, page_name):
+            logger.warning("❌ %s : impossible de cliquer la case Cloudflare", page_name)
+            return False
+
+        if self._poll_cloudflare_passed(page, 15):
+            logger.info("✅ %s : case Cloudflare validée", page_name)
+            try:
+                page.wait_for_load_state('domcontentloaded', timeout=10000)
+            except Exception:
+                pass
+            return True
+
+        logger.warning("❌ %s : toujours bloqué par Cloudflare après clic", page_name)
         return False
 
     def _diagnose_failure(self, page, result: Dict[str, Any], reason: str,
