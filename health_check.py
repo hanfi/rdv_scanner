@@ -27,13 +27,13 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         # Désactiver les logs HTTP pour éviter le spam
         pass
 
-def start_health_server():
+def start_health_server(port=8080):
     """Démarre le serveur de health check en arrière-plan"""
-    server = HTTPServer(('0.0.0.0', 8080), HealthCheckHandler)
+    server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
     server_thread = threading.Thread(target=server.serve_forever)
     server_thread.daemon = True
     server_thread.start()
-    print("🏥 Health check server démarré sur :8080/health")
+    print(f"🏥 Health check server démarré sur :{port}/health")
 
 if __name__ == "__main__":
     start_health_server()

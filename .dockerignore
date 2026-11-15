@@ -1,0 +1,16 @@
+# Secrets locaux : les variables sont configurées dans Railway
+.env
+.env.*
+!.env.example
+
+# Environnement et caches
+.venv/
+venv/
+__pycache__/
+*.pyc
+.git/
+
+# Données générées localement
+screenshots/*
+!screenshots/.gitkeep
+*.log

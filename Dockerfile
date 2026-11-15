@@ -6,6 +6,7 @@ RUN apt-get update && apt-get install -y \
     wget \
     gnupg \
     xvfb \
+    x11-utils \
     x11vnc \
     fluxbox \
     && rm -rf /var/lib/apt/lists/*

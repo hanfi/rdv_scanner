@@ -46,18 +46,24 @@ class MultimodalRDVScanner:
 
     def __init__(self):
         load_dotenv()
-        self.url_page1 = os.getenv('PAGE_1_URL')
-        self.url_page2 = os.getenv('PAGE_2_URL')
+        # PAGE_1_URL, PAGE_2_URL, ... PAGE_N_URL (lus dans l'ordre, sans trou)
+        self.page_urls: List[str] = []
+        index = 1
+        while True:
+            url = (os.getenv(f'PAGE_{index}_URL') or '').strip()
+            if not url:
+                break
+            self.page_urls.append(url)
+            index += 1
+
         self.headless = os.getenv('HEADLESS', 'false').lower() == 'true'
         self.mute_browser = os.getenv('MUTE_BROWSER', 'true').lower() == 'true'
         self.background_mode = os.getenv('BACKGROUND_MODE', 'false').lower() == 'true'
         self.check_interval = int(os.getenv('CHECK_INTERVAL', '300'))
         self.max_retries = 3
 
-        if not self.url_page1:
-            raise ValueError("PAGE_1_URL doit être configuré dans .env")
-        if not self.url_page2:
-            raise ValueError("PAGE_2_URL doit être configuré dans .env")
+        if not self.page_urls:
+            raise ValueError("Au moins PAGE_1_URL doit être configuré dans .env")
 
         # Initialiser le résolveur hybride optimisé
         self.captcha_solver = HybridOptimizedSolver()
@@ -66,8 +72,8 @@ class MultimodalRDVScanner:
         logger.info("=" * 60)
         logger.info("🎯 SCANNER RDV MULTIMODAL INITIALISÉ")
         logger.info("=" * 60)
-        logger.info("Page 1: %s", self.url_page1)
-        logger.info("Page 2: %s", self.url_page2)
+        for page_index, url in enumerate(self.page_urls, start=1):
+            logger.info("Page %s: %s", page_index, url)
         logger.info("Mode headless: %s", self.headless)
         logger.info("Mode muet: %s", self.mute_browser)
         logger.info("Mode arrière-plan: %s", self.background_mode)
@@ -416,17 +422,11 @@ class MultimodalRDVScanner:
                 logger.info("🔊 Son du captcha activé")
 
             try:
-                # Scanner la page 1
-                logger.info("� SCAN PAGE 1")
-                result_page1 = self.scan_single_page_with_retry(
-                    page, self.url_page1, "Page 1")
-                results.append(result_page1)
-
-                # Scanner la page 2
-                logger.info("📝 SCAN PAGE 2")
-                result_page2 = self.scan_single_page_with_retry(
-                    page, self.url_page2, "Page 2")
-                results.append(result_page2)
+                for page_index, url in enumerate(self.page_urls, start=1):
+                    page_name = f"Page {page_index}"
+                    logger.info("📝 SCAN %s", page_name.upper())
+                    results.append(
+                        self.scan_single_page_with_retry(page, url, page_name))
 
             except Exception as e:
                 logger.error("Erreur globale: %s", e, exc_info=True)
@@ -506,18 +506,23 @@ class MultimodalRDVScanner:
             self.check_interval
         )
 
-        # Démarrer le health check server si disponible (pour déploiement cloud)
-        if HEALTH_CHECK_AVAILABLE:
+        # Railway (et la plupart des PaaS) n'expose qu'un port public : $PORT.
+        # Le viewer y est servi, et il répond aussi à /health.
+        viewer_port = int(os.getenv('PORT') or os.getenv('SCREENSHOT_PORT') or 8081)
+        health_port = int(os.getenv('HEALTH_PORT', '8080'))
+
+        # Health check séparé, sauf s'il entrerait en conflit avec le viewer
+        if HEALTH_CHECK_AVAILABLE and health_port != viewer_port:
             try:
-                start_health_server()
+                start_health_server(health_port)
             except Exception as e:
                 logger.warning("Health check server non démarré: %s", e)
 
         # Démarrer le screenshot viewer si disponible
         if SCREENSHOT_VIEWER_AVAILABLE:
             try:
-                run_screenshot_viewer(8081)
-                logger.info("🖼️ Screenshot viewer sécurisé disponible sur :8081")
+                run_screenshot_viewer(viewer_port)
+                logger.info("🖼️ Screenshot viewer sécurisé disponible sur :%s", viewer_port)
             except Exception as e:
                 logger.warning("Screenshot viewer non démarré: %s", e)
 
