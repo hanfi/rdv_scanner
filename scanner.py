@@ -174,6 +174,36 @@ class MultimodalRDVScanner:
                        page_name, max_wait_s)
         return False
 
+    def _diagnose_failure(self, page, result: Dict[str, Any], reason: str,
+                          shot_prefix, attempt: int) -> Dict[str, Any]:
+        """Qualifie un échec : titre + URL dans le message, capture dans screenshots/.
+
+        Si la page reçue est une page Cloudflare, le statut devient BLOCKED.
+        shot_prefix=None : pas de nouvelle capture (déjà prise par l'appelant).
+        """
+        title = ''
+        try:
+            title = page.title()
+        except Exception:
+            pass
+
+        if shot_prefix:
+            try:
+                os.makedirs('screenshots', exist_ok=True)
+                stamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                path = f"screenshots/{shot_prefix}_{stamp}_attempt_{attempt}.png"
+                page.screenshot(path=path, full_page=True, timeout=10000)
+                logger.info("   📸 Capture diagnostic: %s", path)
+            except Exception as e:
+                logger.warning("   ⚠️ Capture diagnostic impossible: %s", e)
+
+        if self._is_cloudflare_page(page):
+            result['status'] = 'BLOCKED'
+            result['message'] = f"Bloqué par Cloudflare — {reason} (titre: '{title}')"
+        else:
+            result['message'] = f"{reason} (titre: '{title}', url: {page.url})"
+        return result
+
     def capture_audio_captcha(self, page, audio_path: str) -> bool:
         """Capture l'audio captcha en cliquant sur le bouton"""
         try:
@@ -251,29 +281,8 @@ class MultimodalRDVScanner:
                 pass
 
             if captcha_field.count() == 0:
-                # Diagnostic : quelle page a-t-on réellement reçue ?
-                title = ''
-                try:
-                    title = page.title()
-                except Exception:
-                    pass
-                diag_path = None
-                try:
-                    os.makedirs('screenshots', exist_ok=True)
-                    stamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-                    diag_path = f"screenshots/no_captcha_{stamp}_attempt_{attempt}.png"
-                    page.screenshot(path=diag_path, full_page=True)
-                except Exception:
-                    diag_path = None
-                if 'cloudflare' in title.lower() or 'attention required' in title.lower() \
-                        or 'just a moment' in title.lower():
-                    result['status'] = 'BLOCKED'
-                    result['message'] = f"Bloqué par Cloudflare (titre: '{title}')"
-                else:
-                    result['message'] = f"Champ captcha non trouvé (titre: '{title}', url: {page.url})"
-                if diag_path:
-                    logger.info("   📸 Capture diagnostic: %s", diag_path)
-                return result
+                return self._diagnose_failure(page, result, "Champ captcha non trouvé",
+                                              "no_captcha", attempt)
 
             page.evaluate('window.scrollBy(0, 500)')
 
@@ -282,8 +291,8 @@ class MultimodalRDVScanner:
             resources = self.capture_captcha_resources(page, attempt)
 
             if not resources['image']:
-                result['message'] = "Image captcha non capturée"
-                return result
+                return self._diagnose_failure(page, result, "Image captcha non capturée",
+                                              "no_image", attempt)
 
             # Résolution avec approche multimodale
             logger.info("🧠 Résolution multimodale du captcha...")
@@ -371,7 +380,9 @@ class MultimodalRDVScanner:
 
             else:
                 result['status'] = 'OTHER'
-                result['message'] = "Réponse inconnue"
+                # after_submit_* est déjà capturé : on ne fait que qualifier la page
+                return self._diagnose_failure(page, result, "Réponse inconnue",
+                                              None, attempt)
 
             return result
 
