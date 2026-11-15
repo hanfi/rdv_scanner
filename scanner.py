@@ -180,10 +180,9 @@ class MultimodalRDVScanner:
         except Exception:
             pass
         if frames.count() == 0:
-            srcs = page.evaluate(
-                "() => Array.from(document.querySelectorAll('iframe')).map(f => f.src || f.title)")
-            logger.warning("⚠️ %s : aucune iframe Cloudflare trouvée (iframes présentes: %s)",
-                           page_name, srcs)
+            frame_urls = [f.url for f in page.frames]
+            logger.warning("⚠️ %s : aucune iframe Cloudflare dans le DOM (frames Playwright: %s)",
+                           page_name, frame_urls)
             return False
         box = frames.first.bounding_box()
         if not box:
