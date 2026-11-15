@@ -61,7 +61,9 @@ class MultimodalRDVScanner:
         self.mute_browser = os.getenv('MUTE_BROWSER', 'true').lower() == 'true'
         self.background_mode = os.getenv('BACKGROUND_MODE', 'false').lower() == 'true'
         self.check_interval = int(os.getenv('CHECK_INTERVAL', '300'))
-        self.max_retries = 3
+        # 5 tentatives : sur Railway, Cloudflare bloque de façon aléatoire et un
+        # nouvel essai finit souvent par passer.
+        self.max_retries = 5
 
         # Suivi de santé : alerte si aucune page n'est vérifiable N cycles de suite
         self.failure_alert_threshold = int(os.getenv('FAILURE_ALERT_CYCLES', '3'))
@@ -152,7 +154,7 @@ class MultimodalRDVScanner:
         return 'just a moment' in title or 'attention required' in title \
             or 'cloudflare' in title
 
-    def _wait_for_cloudflare(self, page, page_name: str, max_wait_s: int = 25) -> bool:
+    def _wait_for_cloudflare(self, page, page_name: str, max_wait_s: int = 5) -> bool:
         """Attend que la page d'attente Cloudflare se valide d'elle-même.
 
         Retourne True si la page n'est pas (ou plus) une page Cloudflare.
@@ -271,7 +273,10 @@ class MultimodalRDVScanner:
 
             # Page d'attente Cloudflare : un navigateur normal la voit souvent se
             # valider seule en quelques secondes. On attend, sans interagir avec.
-            self._wait_for_cloudflare(page, page_name)
+            if not self._wait_for_cloudflare(page, page_name):
+                # Toujours bloqué : inutile d'attendre le formulaire 15 s de plus
+                return self._diagnose_failure(page, result, "Champ captcha non trouvé",
+                                              "no_captcha", attempt)
 
             # Attendre que le formulaire captcha soit rendu
             captcha_field = page.locator('input[name="captchaUsercode"]')
