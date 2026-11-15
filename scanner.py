@@ -374,21 +374,17 @@ class MultimodalRDVScanner:
             resources = self.capture_captcha_resources(page, attempt)
 
             if not resources['image']:
-                # Session refusée par le site : bannière « droits insuffisants ».
-                # Re-naviguer avec les mêmes cookies retombe dans le même état,
-                # donc on repart d'une session neuve (Cloudflare sera recliqué).
+                # Bannière « droits insuffisants » : le site refuse le chargement du
+                # captcha. Vider les cookies n'aide pas (testé : cela redéclenche
+                # Cloudflare), on se contente de qualifier l'échec dans les logs.
                 try:
                     session_refused = 'pas les droits suffisants' in \
                         page.locator('body').inner_text().lower()
                 except Exception:
                     session_refused = False
                 if session_refused:
-                    logger.warning("🔒 %s : session refusée par le site, cookies réinitialisés",
+                    logger.warning("🔒 %s : captcha refusé par le site (droits insuffisants)",
                                    page_name)
-                    try:
-                        page.context.clear_cookies()
-                    except Exception as e:
-                        logger.warning("   ⚠️ Réinitialisation des cookies impossible: %s", e)
                     return self._diagnose_failure(
                         page, result, "Session refusée (droits insuffisants)",
                         "no_image", attempt)
