@@ -143,6 +143,37 @@ class MultimodalRDVScanner:
             logger.error("   ❌ Erreur capture: %s", e)
             return resources
 
+    @staticmethod
+    def _is_cloudflare_page(page) -> bool:
+        try:
+            title = page.title().lower()
+        except Exception:
+            return False
+        return 'just a moment' in title or 'attention required' in title \
+            or 'cloudflare' in title
+
+    def _wait_for_cloudflare(self, page, page_name: str, max_wait_s: int = 25) -> bool:
+        """Attend que la page d'attente Cloudflare se valide d'elle-même.
+
+        Retourne True si la page n'est pas (ou plus) une page Cloudflare.
+        """
+        if not self._is_cloudflare_page(page):
+            return True
+        logger.info("⏳ %s : page Cloudflare, attente de validation (max %ss)...",
+                    page_name, max_wait_s)
+        for _ in range(max_wait_s):
+            page.wait_for_timeout(1000)
+            if not self._is_cloudflare_page(page):
+                logger.info("✅ %s : vérification Cloudflare passée", page_name)
+                try:
+                    page.wait_for_load_state('domcontentloaded', timeout=10000)
+                except Exception:
+                    pass
+                return True
+        logger.warning("❌ %s : toujours bloqué par Cloudflare après %ss",
+                       page_name, max_wait_s)
+        return False
+
     def capture_audio_captcha(self, page, audio_path: str) -> bool:
         """Capture l'audio captcha en cliquant sur le bouton"""
         try:
@@ -207,6 +238,10 @@ class MultimodalRDVScanner:
             logger.info("🚀 Navigation vers %s...", page_name)
             page.goto(url, wait_until='domcontentloaded', timeout=30000)
             logger.info("✅ %s chargée", page_name)
+
+            # Page d'attente Cloudflare : un navigateur normal la voit souvent se
+            # valider seule en quelques secondes. On attend, sans interagir avec.
+            self._wait_for_cloudflare(page, page_name)
 
             # Attendre que le formulaire captcha soit rendu
             captcha_field = page.locator('input[name="captchaUsercode"]')
@@ -375,7 +410,11 @@ class MultimodalRDVScanner:
 
             elif result['status'] == 'BLOCKED':
                 logger.warning("❌ %s BLOQUÉ: %s", page_name, result['message'])
-                return result
+                if attempt < self.max_retries:
+                    logger.info("🔄 %s - Nouvel essai dans 10s...", page_name)
+                    time.sleep(10)
+                else:
+                    return result
 
             elif result['status'] == 'INVALID_CAPTCHA':
                 logger.warning(
