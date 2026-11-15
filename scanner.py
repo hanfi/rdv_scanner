@@ -174,8 +174,16 @@ class MultimodalRDVScanner:
         frames = page.locator(
             'iframe[src*="challenges.cloudflare.com"], '
             'iframe[title*="Cloudflare" i], iframe[title*="challenge" i]')
+        # Le widget Turnstile est injecté après le chargement : on attend son iframe
+        try:
+            frames.first.wait_for(state='visible', timeout=15000)
+        except Exception:
+            pass
         if frames.count() == 0:
-            logger.warning("⚠️ %s : aucune iframe Cloudflare trouvée", page_name)
+            srcs = page.evaluate(
+                "() => Array.from(document.querySelectorAll('iframe')).map(f => f.src || f.title)")
+            logger.warning("⚠️ %s : aucune iframe Cloudflare trouvée (iframes présentes: %s)",
+                           page_name, srcs)
             return False
         box = frames.first.bounding_box()
         if not box:
