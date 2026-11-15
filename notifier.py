@@ -44,6 +44,25 @@ class Notifier:
         logger.info(message)
         logger.info("=" * 60)
     
+    def send_health_alert(self, text: str):
+        """Envoie une alerte d'état du scanner (panne ou rétablissement)"""
+        logger.warning("ALERTE SCANNER: %s", text)
+        if not self.webhook_url:
+            return
+        try:
+            response = requests.post(
+                self.webhook_url,
+                json={"text": text},
+                headers={'Content-Type': 'application/json'},
+                timeout=10
+            )
+            if response.status_code == 200:
+                logger.info("Alerte webhook envoyée avec succès")
+            else:
+                logger.warning(f"Échec d'envoi de l'alerte webhook: {response.status_code}")
+        except Exception as e:
+            logger.error(f"Erreur lors de l'envoi de l'alerte webhook: {e}")
+
     def _format_message(self, results: List[Dict[str, Any]]) -> str:
         """Formate le message de notification"""
         lines = ["🎉 RENDEZ-VOUS DISPONIBLE(S) DÉTECTÉ(S)!", ""]

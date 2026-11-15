@@ -5,6 +5,7 @@ Intègre résolution multimodale (image + audio) avec fallback intelligent
 """
 import os
 import sys
+import base64
 import time
 import logging
 import argparse
@@ -62,6 +63,11 @@ class MultimodalRDVScanner:
         self.check_interval = int(os.getenv('CHECK_INTERVAL', '300'))
         self.max_retries = 3
 
+        # Suivi de santé : alerte si aucune page n'est vérifiable N cycles de suite
+        self.failure_alert_threshold = int(os.getenv('FAILURE_ALERT_CYCLES', '3'))
+        self.failed_cycles = 0
+        self.alert_sent = False
+
         if not self.page_urls:
             raise ValueError("Au moins PAGE_1_URL doit être configuré dans .env")
 
@@ -91,14 +97,38 @@ class MultimodalRDVScanner:
         resources = {'image': None, 'audio': None}
 
         try:
-            # Capture de l'image captcha
-            captcha_images = page.locator('img')
-            if captcha_images.count() > 0:
-                os.makedirs('screenshots', exist_ok=True)
-                image_path = f"screenshots/captcha_image_{timestamp}_attempt_{attempt}.png"
-                captcha_images.first.screenshot(path=image_path)
-                resources['image'] = image_path
-                logger.info("   📸 Image captcha: %s", image_path)
+            # Capture de l'image captcha.
+            # Le captcha est une image inline (data:image/png;base64,...) : on la
+            # décode directement, ce qui ne dépend pas de sa visibilité à l'écran
+            # (sous Xvfb, Playwright la juge parfois invisible et la capture expire).
+            os.makedirs('screenshots', exist_ok=True)
+            image_path = f"screenshots/captcha_image_{timestamp}_attempt_{attempt}.png"
+
+            # L'<img> du captcha est d'abord vide puis remplie en JS (~0,5 s en
+            # local, plus sur un serveur lent) : on attend que son src arrive.
+            data_images = page.locator('img[src^="data:image"]')
+            try:
+                data_images.first.wait_for(state='attached', timeout=15000)
+            except Exception:
+                logger.warning("   ⚠️ Image captcha (data:) non apparue après 15s")
+            if data_images.count() > 0:
+                src = data_images.first.get_attribute('src') or ''
+                try:
+                    encoded = src.split(',', 1)[1]
+                    with open(image_path, 'wb') as f:
+                        f.write(base64.b64decode(encoded))
+                    resources['image'] = image_path
+                    logger.info("   📸 Image captcha (décodée): %s", image_path)
+                except Exception as e:
+                    logger.warning("   ⚠️ Décodage de l'image captcha impossible: %s", e)
+
+            if not resources['image']:
+                # Repli : capture d'écran de la première image visible
+                visible_images = page.locator('img:visible')
+                if visible_images.count() > 0:
+                    visible_images.first.screenshot(path=image_path, timeout=5000)
+                    resources['image'] = image_path
+                    logger.info("   📸 Image captcha (capture): %s", image_path)
 
             # Capture de l'audio captcha
             audio_path = f"screenshots/captcha_audio_{timestamp}_attempt_{attempt}.wav"
@@ -172,22 +202,45 @@ class MultimodalRDVScanner:
         }
 
         try:
-            # Navigation seulement si première tentative
-            if attempt == 1:
-                logger.info("🚀 Navigation vers %s...", page_name)
-                page.goto(url, wait_until='domcontentloaded', timeout=30000)
-                logger.info("✅ %s chargée", page_name)
-            else:
-                logger.info("🔄 Continuation sur %s...", page_name)
+            # Navigation à chaque tentative : un nouveau chargement donne un
+            # captcha neuf et sort d'un éventuel état bloqué de la page.
+            logger.info("🚀 Navigation vers %s...", page_name)
+            page.goto(url, wait_until='domcontentloaded', timeout=30000)
+            logger.info("✅ %s chargée", page_name)
 
-            # Scroll et attente
-            page.evaluate('window.scrollBy(0, 500)')
-
-            # Vérifier la présence du captcha
+            # Attendre que le formulaire captcha soit rendu
             captcha_field = page.locator('input[name="captchaUsercode"]')
+            try:
+                captcha_field.wait_for(state='attached', timeout=15000)
+            except Exception:
+                pass
+
             if captcha_field.count() == 0:
-                result['message'] = "Champ captcha non trouvé"
+                # Diagnostic : quelle page a-t-on réellement reçue ?
+                title = ''
+                try:
+                    title = page.title()
+                except Exception:
+                    pass
+                diag_path = None
+                try:
+                    os.makedirs('screenshots', exist_ok=True)
+                    stamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                    diag_path = f"screenshots/no_captcha_{stamp}_attempt_{attempt}.png"
+                    page.screenshot(path=diag_path, full_page=True)
+                except Exception:
+                    diag_path = None
+                if 'cloudflare' in title.lower() or 'attention required' in title.lower() \
+                        or 'just a moment' in title.lower():
+                    result['status'] = 'BLOCKED'
+                    result['message'] = f"Bloqué par Cloudflare (titre: '{title}')"
+                else:
+                    result['message'] = f"Champ captcha non trouvé (titre: '{title}', url: {page.url})"
+                if diag_path:
+                    logger.info("   📸 Capture diagnostic: %s", diag_path)
                 return result
+
+            page.evaluate('window.scrollBy(0, 500)')
 
             # Capture des ressources captcha
             logger.info("📋 Capture des ressources captcha...")
@@ -490,14 +543,48 @@ class MultimodalRDVScanner:
             except Exception as e:
                 logger.warning("Erreur notification: %s", e)
         else:
-            logger.info(
-                "\n😔 Aucun créneau disponible sur les %s pages",
-                len(results)
-            )
+            self._log_cycle_summary(results)
 
         logger.info("=" * 60)
 
         return results
+
+    def _log_cycle_summary(self, results: List[Dict[str, Any]]):
+        """Résumé honnête : distingue 'vérifié sans créneau' de 'non vérifié'"""
+        checked = [r for r in results if r.get('status') == 'SUCCESS']
+        unchecked = [r for r in results if r.get('status') != 'SUCCESS']
+        if checked:
+            logger.info(
+                "\n😔 Aucun créneau sur %s page(s) vérifiée(s): %s",
+                len(checked),
+                ', '.join(r.get('page', '?') for r in checked)
+            )
+        if unchecked:
+            logger.warning(
+                "\n⚠️ VÉRIFICATION IMPOSSIBLE sur %s page(s): %s",
+                len(unchecked),
+                '; '.join(f"{r.get('page', '?')} ({r.get('message', '')})" for r in unchecked)
+            )
+
+    def _track_scan_health(self, results: List[Dict[str, Any]]):
+        """Alerte Slack si aucune page n'a pu être vérifiée plusieurs cycles d'affilée"""
+        any_checked = any(r.get('status') == 'SUCCESS' for r in results)
+        if any_checked:
+            if self.alert_sent:
+                self.notifier.send_health_alert(
+                    "✅ RDV Scanner : les vérifications fonctionnent de nouveau.")
+            self.failed_cycles = 0
+            self.alert_sent = False
+            return
+
+        self.failed_cycles += 1
+        if self.failed_cycles >= self.failure_alert_threshold and not self.alert_sent:
+            reasons = '; '.join(
+                f"{r.get('page', '?')}: {r.get('message', '')}" for r in results)
+            self.notifier.send_health_alert(
+                f"⚠️ RDV Scanner : aucune démarche n'a pu être vérifiée depuis "
+                f"{self.failed_cycles} cycles. Les créneaux ne sont PAS surveillés.\n{reasons}")
+            self.alert_sent = True
 
     def run_continuous(self):
         """Lance le scanner en mode continu"""
@@ -563,10 +650,9 @@ class MultimodalRDVScanner:
                     except Exception as e:
                         logger.warning("Erreur notification: %s", e)
                 else:
-                    logger.info(
-                        "\n😔 Aucun créneau disponible sur les %s pages",
-                        len(results)
-                    )
+                    self._log_cycle_summary(results)
+
+                self._track_scan_health(results)
 
                 # Attendre avant le prochain scan
                 logger.info("💤 Attente %ss avant le prochain scan...", self.check_interval)
