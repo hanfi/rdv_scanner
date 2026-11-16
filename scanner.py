@@ -494,8 +494,13 @@ class MultimodalRDVScanner:
             return result
 
         except Exception as e:
-            result['message'] = f"Erreur: {str(e)}"
+            err_msg = str(e)
+            result['message'] = f"Erreur: {err_msg}"
             logger.error("Erreur tentative %s: %s", attempt, e)
+            # Page crashée (OOM) : on ne peut pas la récupérer, on
+            # laisse le scan_single_page_with_retry tenter le retry.
+            if 'Page crashed' in err_msg:
+                result['status'] = 'PAGE_CRASHED'
             return result
 
     def scan_single_page_with_retry(self, page, url: str, page_name: str) -> Dict[str, Any]:
@@ -553,6 +558,18 @@ class MultimodalRDVScanner:
                         page_name
                     )
                     return result
+            elif result['status'] == 'PAGE_CRASHED':
+                logger.warning("💥 %s PAGE CRASHÉE (OOM probable): %s",
+                              page_name, result.get('message', ''))
+                if attempt < self.max_retries:
+                    logger.info(
+                        "🔄 %s - Nouvelle tentative dans 3s...",
+                        page_name
+                    )
+                    time.sleep(3)
+                else:
+                    return result
+
             else:
                 logger.warning("⚠️ %s AUTRE: %s", page_name, result['message'])
                 if attempt < self.max_retries:
@@ -583,6 +600,13 @@ class MultimodalRDVScanner:
                 '--disable-renderer-backgrounding',       # Empêche la mise en arrière-plan
                 '--disable-backgrounding-occluded-windows', # Garde les fenêtres actives
                 '--disable-ipc-flooding-protection',       # Améliore la réactivité
+                # Contrôle mémoire dans un conteneur à 1 GB de RAM
+                '--disable-dev-shm-usage',     # Évite /dev/shm (limité en conteneur Docker)
+                '--disable-gpu',               # Pas de GPU en conteneur ; évite les buffers
+                '--disable-software-rasterizer',  # Pas de rendu logiciel lourd
+                '--no-zygote',                 # Pas de processus zygote inutile
+                '--disable-features=TranslateUI',  # Pas de barre de traduction
+                '--disable-sync',              # Pas de synchronisation Chromium
             ]
             
             # Mode arrière-plan : empêche la prise de focus
@@ -614,37 +638,39 @@ class MultimodalRDVScanner:
                 user_agent='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'
             )
 
+            def _setup_page(page):
+                """Configure une page fraîche : mute + diagnostique les erreurs HTTP."""
+                def log_http_error(response):
+                    try:
+                        if response.status >= 400:
+                            headers = response.headers
+                            logger.warning(
+                                "   🌐 HTTP %s %s %s (cf-mitigated=%s, cf-ray=%s)",
+                                response.status, response.request.method,
+                                response.url[:150],
+                                headers.get('cf-mitigated', '-'),
+                                headers.get('cf-ray', '-'))
+                    except Exception:
+                        pass
+
+                page.on('response', log_http_error)
+
+                if self.mute_browser:
+                    try:
+                        page.evaluate(
+                            '() => { if (navigator.mediaDevices) { navigator.mediaDevices.getUserMedia = () => Promise.reject(new Error("Muted")); } }')
+                        page.evaluate(
+                            '() => { Object.defineProperty(HTMLMediaElement.prototype, "muted", { value: true, writable: false }); }')
+                        page.evaluate(
+                            '() => { Object.defineProperty(HTMLAudioElement.prototype, "volume", { value: 0, writable: false }); }')
+                    except Exception as e:
+                        logger.warning("⚠️ Impossible de muter l'onglet: %s", e)
+
+            # Page initiale
             page = context.new_page()
-
-            # Diagnostic : toute réponse HTTP en erreur, avec l'en-tête Cloudflare
-            # cf-mitigated (« challenge » = requête filtrée par Cloudflare).
-            def log_http_error(response):
-                try:
-                    if response.status >= 400:
-                        headers = response.headers
-                        logger.warning(
-                            "   🌐 HTTP %s %s %s (cf-mitigated=%s, cf-ray=%s)",
-                            response.status, response.request.method,
-                            response.url[:150],
-                            headers.get('cf-mitigated', '-'),
-                            headers.get('cf-ray', '-'))
-                except Exception:
-                    pass
-
-            page.on('response', log_http_error)
-
-            # Muter l'onglet pour éviter le son du captcha (si configuré)
+            _setup_page(page)
             if self.mute_browser:
-                try:
-                    page.evaluate(
-                        '() => { if (navigator.mediaDevices) { navigator.mediaDevices.getUserMedia = () => Promise.reject(new Error("Muted")); } }')
-                    page.evaluate(
-                        '() => { Object.defineProperty(HTMLMediaElement.prototype, "muted", { value: true, writable: false }); }')
-                    page.evaluate(
-                        '() => { Object.defineProperty(HTMLAudioElement.prototype, "volume", { value: 0, writable: false }); }')
-                    logger.info("🔇 Onglet muté automatiquement")
-                except Exception as e:
-                    logger.warning("⚠️ Impossible de muter l'onglet: %s", e)
+                logger.info("🔇 Onglet muté automatiquement")
             else:
                 logger.info("🔊 Son du captcha activé")
 
@@ -652,8 +678,28 @@ class MultimodalRDVScanner:
                 for page_index, url in enumerate(self.page_urls, start=1):
                     page_name = f"Page {page_index}"
                     logger.info("📝 SCAN %s", page_name.upper())
+
+                    # Vérifier que la page est toujours vivante ; la recréer si elle
+                    # a crashé (OOM dans un conteneur à 1 GB de RAM).
+                    try:
+                        page.evaluate('() => 1')
+                    except Exception:
+                        logger.warning("⚠️ %s : page crashée, recréation...", page_name)
+                        page = context.new_page()
+                        _setup_page(page)
+
                     results.append(
                         self.scan_single_page_with_retry(page, url, page_name))
+
+                    # Libérer la mémoire entre les pages : fermer la page courante
+                    # et en créer une fraîche pour la suivante.
+                    if page_index < len(self.page_urls):
+                        try:
+                            page.close()
+                        except Exception:
+                            pass
+                        page = context.new_page()
+                        _setup_page(page)
 
             except Exception as e:
                 logger.error("Erreur globale: %s", e, exc_info=True)

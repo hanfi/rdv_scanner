@@ -5,7 +5,9 @@ echo "🚀 Démarrage du scanner RDV avec display virtuel..."
 
 # Démarrer Xvfb (serveur X virtuel) en arrière-plan
 echo "🖥️  Démarrage du display virtuel Xvfb..."
-Xvfb :99 -screen 0 "${XVFB_WHD:-1366x768x24}" -ac +extension GLX +render -noreset &
+# Profondeur 16 bits (vs 24) = ~30 % de mémoire framebuffer en moins,
+# critique dans un conteneur limité à 1 GB de RAM.
+Xvfb :99 -screen 0 "${XVFB_WHD:-1366x768x16}" -ac +extension GLX +render -noreset &
 XVFB_PID=$!
 
 # Attendre que Xvfb soit prêt
