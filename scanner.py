@@ -74,8 +74,12 @@ class MultimodalRDVScanner:
         # Clic sur la case « Verify you are human » si Cloudflare ne se valide pas seul
         self.cloudflare_click = os.getenv('CLOUDFLARE_CLICK', 'true').lower() == 'true'
 
-        # Persistance des cookies entre cycles pour réutiliser les sessions Cloudflare
-        self.cookies_path = 'cookies.json'
+        # Session navigateur (cookies + localStorage) conservée entre les cycles :
+        # en mémoire, et sur disque pour les lancements --once successifs.
+        self.state_path = 'browser_state.json'
+        self.storage_state = None
+        # URL d'API captcha ayant reçu un challenge Cloudflare (tentative en cours)
+        self._api_challenge_url = None
 
         if not self.page_urls:
             raise ValueError("Au moins PAGE_1_URL doit être configuré dans .env")
@@ -258,6 +262,40 @@ class MultimodalRDVScanner:
         logger.warning("❌ %s : toujours bloqué par Cloudflare après clic", page_name)
         return False
 
+    def _solve_api_challenge(self, page, page_name: str) -> bool:
+        """Résout un challenge Cloudflare posé sur l'API captcha.
+
+        Le challenge arrive sur une requête XHR (image/son du captcha), que le
+        navigateur ne peut pas résoudre. On ouvre donc cette URL en navigation
+        pleine page : la page « Just a moment... » s'affiche et la logique
+        Turnstile habituelle peut la valider, ce qui pose le cookie cf_clearance.
+        Retourne True si le challenge est passé.
+        """
+        challenge_url = self._api_challenge_url
+        if not challenge_url:
+            return False
+        self._api_challenge_url = None
+        logger.info("🧩 %s : challenge Cloudflare sur l'API captcha, "
+                    "résolution en navigation pleine page...", page_name)
+        try:
+            page.goto(challenge_url, wait_until='domcontentloaded', timeout=30000)
+        except Exception as e:
+            logger.warning("⚠️ %s : navigation vers l'API captcha impossible: %s",
+                           page_name, e)
+            return False
+        # Le challenge ne s'affiche pas toujours immédiatement en pleine page
+        page.wait_for_timeout(1500)
+        if not self._is_cloudflare_page(page):
+            logger.info("✅ %s : API captcha accessible sans challenge en pleine page",
+                        page_name)
+            return True
+        passed = self._wait_for_cloudflare(page, page_name)
+        if passed:
+            logger.info("✅ %s : challenge de l'API captcha résolu", page_name)
+        else:
+            logger.warning("❌ %s : challenge de l'API captcha non résolu", page_name)
+        return passed
+
     def _diagnose_failure(self, page, result: Dict[str, Any], reason: str,
                           shot_prefix, attempt: int) -> Dict[str, Any]:
         """Qualifie un échec : titre + URL dans le message, capture dans screenshots/.
@@ -350,6 +388,7 @@ class MultimodalRDVScanner:
             # Navigation à chaque tentative : un nouveau chargement donne un
             # captcha neuf et sort d'un éventuel état bloqué de la page.
             logger.info("🚀 Navigation vers %s...", page_name)
+            self._api_challenge_url = None
             page.goto(url, wait_until='domcontentloaded', timeout=30000)
             logger.info("✅ %s chargée", page_name)
 
@@ -376,6 +415,18 @@ class MultimodalRDVScanner:
             # Capture des ressources captcha
             logger.info("📋 Capture des ressources captcha...")
             resources = self.capture_captcha_resources(page, attempt)
+
+            if not resources['image'] and self._api_challenge_url:
+                # L'API captcha a reçu un challenge Cloudflare : on le résout en
+                # pleine page, puis la tentative suivante recharge le formulaire
+                # avec le cookie cf_clearance obtenu.
+                if self._solve_api_challenge(page, page_name):
+                    result['status'] = 'API_CHALLENGE_SOLVED'
+                    result['message'] = "Challenge de l'API captcha résolu, nouvel essai"
+                    return result
+                return self._diagnose_failure(
+                    page, result, "Challenge Cloudflare sur l'API captcha non résolu",
+                    "api_challenge", attempt)
 
             if not resources['image']:
                 # Bannière « droits insuffisants » : le site refuse le chargement du
@@ -562,6 +613,11 @@ class MultimodalRDVScanner:
                         page_name
                     )
                     return result
+            elif result['status'] == 'API_CHALLENGE_SOLVED':
+                logger.info("🧩 %s : %s", page_name, result['message'])
+                if attempt >= self.max_retries:
+                    return result
+
             elif result['status'] == 'PAGE_CRASHED':
                 logger.warning("💥 %s PAGE CRASHÉE (OOM probable): %s",
                               page_name, result.get('message', ''))
@@ -588,11 +644,7 @@ class MultimodalRDVScanner:
         return result
 
     def scan_with_multimodal_retry(self, context) -> List[Dict[str, Any]]:
-        """
-        Scan toutes les pages avec le contexte navigateur fourni.
-        En mode --once, le contexte est créé/détruit ici.
-        En mode --continuous, le contexte est réutilisé entre les cycles.
-        """
+        """Scanne toutes les pages dans le contexte fourni (créé par scan_cycle)."""
         logger.info("=" * 60)
         logger.info("🎯 DÉBUT DU SCAN MULTIMODAL AVEC RETRY")
         logger.info("=" * 60)
@@ -611,38 +663,17 @@ class MultimodalRDVScanner:
                             response.url[:150],
                             headers.get('cf-mitigated', '-'),
                             headers.get('cf-ray', '-'))
+                        # Challenge Cloudflare sur l'API captcha : un XHR ne peut
+                        # pas le résoudre, on retient l'URL pour la rejouer en
+                        # navigation pleine page (voir _solve_api_challenge).
+                        if response.status == 403 \
+                                and headers.get('cf-mitigated') == 'challenge' \
+                                and '/api/captcha/' in response.url:
+                            self._api_challenge_url = response.url
                 except Exception:
                     pass
 
             page.on('response', log_http_error)
-
-            # Patch fingerprint navigateur pour éviter la détection
-            # Linux/datacenter par Cloudflare
-            page.add_init_script("""
-                Object.defineProperty(navigator, 'platform',
-                    { get: () => 'MacIntel' });
-                Object.defineProperty(navigator, 'hardwareConcurrency',
-                    { get: () => 8 });
-                Object.defineProperty(navigator, 'deviceMemory',
-                    { get: () => 8 });
-
-                const getParam = WebGLRenderingContext.prototype.getParameter;
-                WebGLRenderingContext.prototype.getParameter = function(p) {
-                    if (p === 37445) return 'Apple Inc.';
-                    if (p === 37446) return 'Apple M1';
-                    return getParam.call(this, p);
-                };
-
-                const gl2 = WebGL2RenderingContext;
-                if (gl2) {
-                    const getParam2 = gl2.prototype.getParameter;
-                    gl2.prototype.getParameter = function(p) {
-                        if (p === 37445) return 'Apple Inc.';
-                        if (p === 37446) return 'Apple M1';
-                        return getParam2.call(this, p);
-                    };
-                }
-            """)
 
             if self.mute_browser:
                 try:
@@ -701,11 +732,78 @@ class MultimodalRDVScanner:
 
         return results
 
-    def _create_browser_and_context(self):
-        """Crée le navigateur Playwright et le contexte avec fingerprint + cookies.
-        Retourne (playwright, browser, context). L'appelant est responsable du cleanup."""
-        p = sync_playwright().start()
+    def _load_storage_state(self):
+        """Session à injecter dans le prochain contexte : mémoire, sinon disque."""
+        if self.storage_state:
+            return self.storage_state
+        if os.path.exists(self.state_path):
+            try:
+                with open(self.state_path, 'r') as f:
+                    self.storage_state = json.load(f)
+                logger.info("🍪 Session chargée depuis %s (%s cookies)", self.state_path,
+                            len(self.storage_state.get('cookies', [])))
+            except Exception as e:
+                logger.warning("⚠️ Session illisible (%s), ignorée: %s", self.state_path, e)
+                self.storage_state = None
+        return self.storage_state
 
+    def _save_storage_state(self, context):
+        """Garde la session du contexte pour le cycle suivant (mémoire + disque)."""
+        try:
+            state = context.storage_state()
+        except Exception as e:
+            logger.warning("⚠️ Session non récupérable (navigateur crashé ?): %s", e)
+            return
+        self.storage_state = state
+        cookie_names = [c.get('name') for c in state.get('cookies', [])]
+        logger.info("💾 Session conservée: %s cookies (cf_clearance: %s)",
+                    len(cookie_names), 'oui' if 'cf_clearance' in cookie_names else 'non')
+        try:
+            with open(self.state_path, 'w') as f:
+                json.dump(state, f)
+        except Exception as e:
+            logger.warning("⚠️ Écriture de %s impossible: %s", self.state_path, e)
+
+    def scan_cycle(self) -> List[Dict[str, Any]]:
+        """Un cycle complet avec un navigateur neuf.
+
+        Le navigateur est recréé à chaque cycle (un crash ne contamine pas le
+        suivant) ; seule la session (cookies, localStorage) est transmise.
+        Ne lève jamais : un échec de lancement devient un résultat ERROR.
+        """
+        try:
+            with sync_playwright() as p:
+                browser = self._launch_browser(p)
+                try:
+                    context_options = {'viewport': {'width': 1366, 'height': 768}}
+                    state = self._load_storage_state()
+                    if state:
+                        context_options['storage_state'] = state
+                    context = browser.new_context(**context_options)
+                    try:
+                        return self.scan_with_multimodal_retry(context)
+                    finally:
+                        self._save_storage_state(context)
+                finally:
+                    try:
+                        browser.close()
+                    except Exception:
+                        pass
+        except Exception as e:
+            logger.error("Erreur navigateur: %s", e, exc_info=True)
+            return [{
+                'status': 'ERROR',
+                'message': f"Erreur navigateur: {e}",
+                'page': 'Global',
+                'available': False
+            }]
+
+    def _launch_browser(self, p):
+        """Lance Chromium avec les options mémoire / muet / arrière-plan.
+
+        Pas d'override du user-agent ni de patch du fingerprint : Chromium
+        annonce son vrai UA Linux, cohérent avec ses en-têtes et son rendu.
+        """
         launch_args = [
             '--disable-blink-features=AutomationControlled',
             '--no-first-run',
@@ -740,49 +838,16 @@ class MultimodalRDVScanner:
             ])
             logger.info("🔇 Arguments de muting ajoutés au navigateur")
 
-        browser = p.chromium.launch(
+        return p.chromium.launch(
             headless=self.headless,
             args=launch_args
         )
-
-        context = browser.new_context(
-            viewport={'width': 1366, 'height': 768},
-            user_agent='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'
-        )
-
-        # Charger les cookies persistés (session Cloudflare) s'ils existent
-        if os.path.exists(self.cookies_path):
-            try:
-                with open(self.cookies_path, 'r') as f:
-                    cookies = json.load(f)
-                context.add_cookies(cookies)
-                logger.info("🍪 %s cookies chargés depuis %s",
-                            len(cookies), self.cookies_path)
-            except Exception as e:
-                logger.warning("⚠️ Impossible de charger les cookies: %s", e)
-
-        return p, browser, context
 
     def run_once(self) -> List[Dict[str, Any]]:
         """Lance un scan unique"""
         logger.info("🚀 Démarrage du scanner multimodal (mode unique)")
 
-        p, browser, context = self._create_browser_and_context()
-        try:
-            results = self.scan_with_multimodal_retry(context)
-        finally:
-            # Sauvegarder les cookies avant de fermer
-            try:
-                cookies = context.cookies()
-                if cookies:
-                    with open(self.cookies_path, 'w') as f:
-                        json.dump(cookies, f)
-                    logger.info("💾 %s cookies sauvegardés dans %s",
-                                len(cookies), self.cookies_path)
-            except Exception as e:
-                logger.warning("⚠️ Impossible de sauvegarder les cookies: %s", e)
-            browser.close()
-            p.stop()
+        results = self.scan_cycle()
 
         # Affichage des résultats finaux
         logger.info("=" * 60)
@@ -897,16 +962,8 @@ class MultimodalRDVScanner:
                 logger.warning("Screenshot viewer non démarré: %s", e)
 
         scan_count = 0
-        p = None
-        browser = None
-        context = None
 
         try:
-            # Créer le navigateur une fois et le réutiliser entre les cycles
-            # pour conserver les cookies Cloudflare entre les scans
-            p, browser, context = self._create_browser_and_context()
-            logger.info("🌐 Navigateur créé — réutilisé entre les cycles pour la session Cloudflare")
-
             while True:
                 scan_count += 1
                 logger.info(
@@ -915,18 +972,7 @@ class MultimodalRDVScanner:
                     datetime.now().strftime('%H:%M:%S')
                 )
 
-                results = self.scan_with_multimodal_retry(context)
-
-                # Sauvegarder les cookies après chaque cycle
-                try:
-                    cookies = context.cookies()
-                    if cookies:
-                        with open(self.cookies_path, 'w') as f:
-                            json.dump(cookies, f)
-                        logger.info("💾 %s cookies sauvegardés dans %s",
-                                    len(cookies), self.cookies_path)
-                except Exception as e:
-                    logger.warning("⚠️ Impossible de sauvegarder les cookies: %s", e)
+                results = self.scan_cycle()
 
                 # Vérifier les créneaux disponibles
                 available_pages = []
@@ -963,19 +1009,9 @@ class MultimodalRDVScanner:
         except KeyboardInterrupt:
             logger.info("⏹️ Arrêt du scanner par l'utilisateur")
         except Exception as e:
+            # Remonte vers main() → exit 1, pour que Railway (ON_FAILURE) redémarre
             logger.error("Erreur fatale: %s", e, exc_info=True)
-        finally:
-            if browser:
-                try:
-                    browser.close()
-                except Exception:
-                    pass
-            if p:
-                try:
-                    p.stop()
-                except Exception:
-                    pass
-            logger.info("🧹 Navigateur fermé proprement")
+            raise
 
 
 def main():

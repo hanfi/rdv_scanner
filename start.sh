@@ -30,11 +30,12 @@ else
     exit 1
 fi
 
-# Fonction de nettoyage à l'arrêt
+# Fonction de nettoyage à l'arrêt (le code de sortie est transmis pour que
+# Railway, en restartPolicy ON_FAILURE, redémarre si le scanner a planté)
 cleanup() {
     echo "🧹 Nettoyage des processus..."
     kill $XVFB_PID $FLUXBOX_PID 2>/dev/null
-    exit 0
+    exit "${1:-0}"
 }
 
 # Capturer les signaux d'arrêt
@@ -47,6 +48,8 @@ SCANNER_PID=$!
 
 # Attendre le processus principal
 wait $SCANNER_PID
+SCANNER_EXIT=$?
+echo "Scanner terminé (code $SCANNER_EXIT)"
 
 # Nettoyage final
-cleanup
+cleanup "$SCANNER_EXIT"
