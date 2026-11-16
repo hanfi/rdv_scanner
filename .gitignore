@@ -18,6 +18,9 @@ env/
 .env.local
 .env.production
 
+# Cookies persistés (session Cloudflare)
+cookies.json
+
 # Logs
 *.log
 logs/

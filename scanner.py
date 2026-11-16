@@ -5,6 +5,7 @@ Intègre résolution multimodale (image + audio) avec fallback intelligent
 """
 import os
 import sys
+import json
 import base64
 import time
 import logging
@@ -72,6 +73,9 @@ class MultimodalRDVScanner:
 
         # Clic sur la case « Verify you are human » si Cloudflare ne se valide pas seul
         self.cloudflare_click = os.getenv('CLOUDFLARE_CLICK', 'true').lower() == 'true'
+
+        # Persistance des cookies entre cycles pour réutiliser les sessions Cloudflare
+        self.cookies_path = 'cookies.json'
 
         if not self.page_urls:
             raise ValueError("Au moins PAGE_1_URL doit être configuré dans .env")
@@ -583,143 +587,202 @@ class MultimodalRDVScanner:
 
         return result
 
-    def scan_with_multimodal_retry(self) -> List[Dict[str, Any]]:
+    def scan_with_multimodal_retry(self, context) -> List[Dict[str, Any]]:
+        """
+        Scan toutes les pages avec le contexte navigateur fourni.
+        En mode --once, le contexte est créé/détruit ici.
+        En mode --continuous, le contexte est réutilisé entre les cycles.
+        """
         logger.info("=" * 60)
         logger.info("🎯 DÉBUT DU SCAN MULTIMODAL AVEC RETRY")
         logger.info("=" * 60)
 
         results = []
 
-        with sync_playwright() as p:
-            # Arguments de lancement avec muting si configuré
-            launch_args = [
-                '--disable-blink-features=AutomationControlled',
-                '--no-first-run',              # Pas de setup initial
-                '--no-default-browser-check',  # Pas de vérification navigateur par défaut
-                '--disable-background-timer-throttling',  # Meilleure performance
-                '--disable-renderer-backgrounding',       # Empêche la mise en arrière-plan
-                '--disable-backgrounding-occluded-windows', # Garde les fenêtres actives
-                '--disable-ipc-flooding-protection',       # Améliore la réactivité
-                # Contrôle mémoire dans un conteneur à 1 GB de RAM
-                '--disable-dev-shm-usage',     # Évite /dev/shm (limité en conteneur Docker)
-                '--disable-gpu',               # Pas de GPU en conteneur ; évite les buffers
-                '--disable-software-rasterizer',  # Pas de rendu logiciel lourd
-                '--no-zygote',                 # Pas de processus zygote inutile
-                '--disable-features=TranslateUI',  # Pas de barre de traduction
-                '--disable-sync',              # Pas de synchronisation Chromium
-            ]
-            
-            # Mode arrière-plan : empêche la prise de focus
-            if self.background_mode:
-                launch_args.extend([
-                    '--silent-launch',           # Lancement silencieux
-                    '--disable-background-mode', # Désactive le mode arrière-plan agressif
-                    '--disable-extensions',      # Désactive les extensions
-                    '--disable-plugins',         # Désactive les plugins
-                    '--disable-default-apps',    # Pas d'apps par défaut
-                ])
-                logger.info("🔕 Mode arrière-plan activé (pas de prise de focus)")
-            
+        def _setup_page(page):
+            """Configure une page fraîche : mute + diagnostique les erreurs HTTP."""
+            def log_http_error(response):
+                try:
+                    if response.status >= 400:
+                        headers = response.headers
+                        logger.warning(
+                            "   🌐 HTTP %s %s %s (cf-mitigated=%s, cf-ray=%s)",
+                            response.status, response.request.method,
+                            response.url[:150],
+                            headers.get('cf-mitigated', '-'),
+                            headers.get('cf-ray', '-'))
+                except Exception:
+                    pass
+
+            page.on('response', log_http_error)
+
+            # Patch fingerprint navigateur pour éviter la détection
+            # Linux/datacenter par Cloudflare
+            page.add_init_script("""
+                Object.defineProperty(navigator, 'platform',
+                    { get: () => 'MacIntel' });
+                Object.defineProperty(navigator, 'hardwareConcurrency',
+                    { get: () => 8 });
+                Object.defineProperty(navigator, 'deviceMemory',
+                    { get: () => 8 });
+
+                const getParam = WebGLRenderingContext.prototype.getParameter;
+                WebGLRenderingContext.prototype.getParameter = function(p) {
+                    if (p === 37445) return 'Apple Inc.';
+                    if (p === 37446) return 'Apple M1';
+                    return getParam.call(this, p);
+                };
+
+                const gl2 = WebGL2RenderingContext;
+                if (gl2) {
+                    const getParam2 = gl2.prototype.getParameter;
+                    gl2.prototype.getParameter = function(p) {
+                        if (p === 37445) return 'Apple Inc.';
+                        if (p === 37446) return 'Apple M1';
+                        return getParam2.call(this, p);
+                    };
+                }
+            """)
+
             if self.mute_browser:
-                launch_args.extend([
-                    '--mute-audio',
-                    '--disable-audio-output',
-                    '--disable-background-audio'
-                ])
-                logger.info("🔇 Arguments de muting ajoutés au navigateur")
+                try:
+                    page.evaluate(
+                        '() => { if (navigator.mediaDevices) { navigator.mediaDevices.getUserMedia = () => Promise.reject(new Error("Muted")); } }')
+                    page.evaluate(
+                        '() => { Object.defineProperty(HTMLMediaElement.prototype, "muted", { value: true, writable: false }); }')
+                    page.evaluate(
+                        '() => { Object.defineProperty(HTMLAudioElement.prototype, "volume", { value: 0, writable: false }); }')
+                except Exception as e:
+                    logger.warning("⚠️ Impossible de muter l'onglet: %s", e)
 
-            browser = p.chromium.launch(
-                headless=self.headless,
-                args=launch_args
-            )
+        # Page initiale
+        page = context.new_page()
+        _setup_page(page)
+        if self.mute_browser:
+            logger.info("🔇 Onglet muté automatiquement")
+        else:
+            logger.info("🔊 Son du captcha activé")
 
-            context = browser.new_context(
-                viewport={'width': 1366, 'height': 768},
-                user_agent='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'
-            )
+        try:
+            for page_index, url in enumerate(self.page_urls, start=1):
+                page_name = f"Page {page_index}"
+                logger.info("📝 SCAN %s", page_name.upper())
 
-            def _setup_page(page):
-                """Configure une page fraîche : mute + diagnostique les erreurs HTTP."""
-                def log_http_error(response):
+                # Vérifier que la page est toujours vivante ; la recréer si elle
+                # a crashé (OOM dans un conteneur à 1 GB de RAM).
+                try:
+                    page.evaluate('() => 1')
+                except Exception:
+                    logger.warning("⚠️ %s : page crashée, recréation...", page_name)
+                    page = context.new_page()
+                    _setup_page(page)
+
+                results.append(
+                    self.scan_single_page_with_retry(page, url, page_name))
+
+                # Libérer la mémoire entre les pages : fermer la page courante
+                # et en créer une fraîche pour la suivante.
+                if page_index < len(self.page_urls):
                     try:
-                        if response.status >= 400:
-                            headers = response.headers
-                            logger.warning(
-                                "   🌐 HTTP %s %s %s (cf-mitigated=%s, cf-ray=%s)",
-                                response.status, response.request.method,
-                                response.url[:150],
-                                headers.get('cf-mitigated', '-'),
-                                headers.get('cf-ray', '-'))
+                        page.close()
                     except Exception:
                         pass
+                    page = context.new_page()
+                    _setup_page(page)
 
-                page.on('response', log_http_error)
-
-                if self.mute_browser:
-                    try:
-                        page.evaluate(
-                            '() => { if (navigator.mediaDevices) { navigator.mediaDevices.getUserMedia = () => Promise.reject(new Error("Muted")); } }')
-                        page.evaluate(
-                            '() => { Object.defineProperty(HTMLMediaElement.prototype, "muted", { value: true, writable: false }); }')
-                        page.evaluate(
-                            '() => { Object.defineProperty(HTMLAudioElement.prototype, "volume", { value: 0, writable: false }); }')
-                    except Exception as e:
-                        logger.warning("⚠️ Impossible de muter l'onglet: %s", e)
-
-            # Page initiale
-            page = context.new_page()
-            _setup_page(page)
-            if self.mute_browser:
-                logger.info("🔇 Onglet muté automatiquement")
-            else:
-                logger.info("🔊 Son du captcha activé")
-
-            try:
-                for page_index, url in enumerate(self.page_urls, start=1):
-                    page_name = f"Page {page_index}"
-                    logger.info("📝 SCAN %s", page_name.upper())
-
-                    # Vérifier que la page est toujours vivante ; la recréer si elle
-                    # a crashé (OOM dans un conteneur à 1 GB de RAM).
-                    try:
-                        page.evaluate('() => 1')
-                    except Exception:
-                        logger.warning("⚠️ %s : page crashée, recréation...", page_name)
-                        page = context.new_page()
-                        _setup_page(page)
-
-                    results.append(
-                        self.scan_single_page_with_retry(page, url, page_name))
-
-                    # Libérer la mémoire entre les pages : fermer la page courante
-                    # et en créer une fraîche pour la suivante.
-                    if page_index < len(self.page_urls):
-                        try:
-                            page.close()
-                        except Exception:
-                            pass
-                        page = context.new_page()
-                        _setup_page(page)
-
-            except Exception as e:
-                logger.error("Erreur globale: %s", e, exc_info=True)
-                results.append({
-                    'status': 'ERROR',
-                    'message': f"Erreur globale: {str(e)}",
-                    'page': 'Global',
-                    'available': False
-                })
-
-            finally:
-                browser.close()
+        except Exception as e:
+            logger.error("Erreur globale: %s", e, exc_info=True)
+            results.append({
+                'status': 'ERROR',
+                'message': f"Erreur globale: {str(e)}",
+                'page': 'Global',
+                'available': False
+            })
 
         return results
+
+    def _create_browser_and_context(self):
+        """Crée le navigateur Playwright et le contexte avec fingerprint + cookies.
+        Retourne (playwright, browser, context). L'appelant est responsable du cleanup."""
+        p = sync_playwright().start()
+
+        launch_args = [
+            '--disable-blink-features=AutomationControlled',
+            '--no-first-run',
+            '--no-default-browser-check',
+            '--disable-background-timer-throttling',
+            '--disable-renderer-backgrounding',
+            '--disable-backgrounding-occluded-windows',
+            '--disable-ipc-flooding-protection',
+            '--disable-dev-shm-usage',
+            '--disable-gpu',
+            '--disable-software-rasterizer',
+            '--no-zygote',
+            '--disable-features=TranslateUI',
+            '--disable-sync',
+        ]
+
+        if self.background_mode:
+            launch_args.extend([
+                '--silent-launch',
+                '--disable-background-mode',
+                '--disable-extensions',
+                '--disable-plugins',
+                '--disable-default-apps',
+            ])
+            logger.info("🔕 Mode arrière-plan activé (pas de prise de focus)")
+
+        if self.mute_browser:
+            launch_args.extend([
+                '--mute-audio',
+                '--disable-audio-output',
+                '--disable-background-audio'
+            ])
+            logger.info("🔇 Arguments de muting ajoutés au navigateur")
+
+        browser = p.chromium.launch(
+            headless=self.headless,
+            args=launch_args
+        )
+
+        context = browser.new_context(
+            viewport={'width': 1366, 'height': 768},
+            user_agent='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'
+        )
+
+        # Charger les cookies persistés (session Cloudflare) s'ils existent
+        if os.path.exists(self.cookies_path):
+            try:
+                with open(self.cookies_path, 'r') as f:
+                    cookies = json.load(f)
+                context.add_cookies(cookies)
+                logger.info("🍪 %s cookies chargés depuis %s",
+                            len(cookies), self.cookies_path)
+            except Exception as e:
+                logger.warning("⚠️ Impossible de charger les cookies: %s", e)
+
+        return p, browser, context
 
     def run_once(self) -> List[Dict[str, Any]]:
         """Lance un scan unique"""
         logger.info("🚀 Démarrage du scanner multimodal (mode unique)")
 
-        results = self.scan_with_multimodal_retry()
+        p, browser, context = self._create_browser_and_context()
+        try:
+            results = self.scan_with_multimodal_retry(context)
+        finally:
+            # Sauvegarder les cookies avant de fermer
+            try:
+                cookies = context.cookies()
+                if cookies:
+                    with open(self.cookies_path, 'w') as f:
+                        json.dump(cookies, f)
+                    logger.info("💾 %s cookies sauvegardés dans %s",
+                                len(cookies), self.cookies_path)
+            except Exception as e:
+                logger.warning("⚠️ Impossible de sauvegarder les cookies: %s", e)
+            browser.close()
+            p.stop()
 
         # Affichage des résultats finaux
         logger.info("=" * 60)
@@ -834,8 +897,16 @@ class MultimodalRDVScanner:
                 logger.warning("Screenshot viewer non démarré: %s", e)
 
         scan_count = 0
+        p = None
+        browser = None
+        context = None
 
         try:
+            # Créer le navigateur une fois et le réutiliser entre les cycles
+            # pour conserver les cookies Cloudflare entre les scans
+            p, browser, context = self._create_browser_and_context()
+            logger.info("🌐 Navigateur créé — réutilisé entre les cycles pour la session Cloudflare")
+
             while True:
                 scan_count += 1
                 logger.info(
@@ -844,7 +915,18 @@ class MultimodalRDVScanner:
                     datetime.now().strftime('%H:%M:%S')
                 )
 
-                results = self.scan_with_multimodal_retry()
+                results = self.scan_with_multimodal_retry(context)
+
+                # Sauvegarder les cookies après chaque cycle
+                try:
+                    cookies = context.cookies()
+                    if cookies:
+                        with open(self.cookies_path, 'w') as f:
+                            json.dump(cookies, f)
+                        logger.info("💾 %s cookies sauvegardés dans %s",
+                                    len(cookies), self.cookies_path)
+                except Exception as e:
+                    logger.warning("⚠️ Impossible de sauvegarder les cookies: %s", e)
 
                 # Vérifier les créneaux disponibles
                 available_pages = []
@@ -882,6 +964,18 @@ class MultimodalRDVScanner:
             logger.info("⏹️ Arrêt du scanner par l'utilisateur")
         except Exception as e:
             logger.error("Erreur fatale: %s", e, exc_info=True)
+        finally:
+            if browser:
+                try:
+                    browser.close()
+                except Exception:
+                    pass
+            if p:
+                try:
+                    p.stop()
+                except Exception:
+                    pass
+            logger.info("🧹 Navigateur fermé proprement")
 
 
 def main():
